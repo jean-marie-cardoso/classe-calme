@@ -2,6 +2,7 @@
   'use strict';
   const checkbox = document.getElementById('linkActivities');
   const status = document.getElementById('relayStatus');
+  const connections = document.getElementById('activityConnections');
   const connectButton = document.getElementById('connectActivities');
   const auth = window.ClasseCalmeAuth;
   const storageKey = 'classe-calme.link-activities.v1';
@@ -23,9 +24,17 @@
     connectButton.hidden = Boolean(auth?.getGrant());
   }
   function setStatus(message, viewers) {
-    status.textContent = message;
-    status.title = Number.isInteger(viewers) && viewers >= 0
-      ? viewers + (viewers === 1 ? ' page d’activité ouverte' : ' pages d’activité ouvertes') : '';
+    const counted = message === 'Activités : reliées' && Number.isInteger(viewers) && viewers >= 0;
+    const description = counted ? viewers + (viewers === 1 ? ' page d’activité connectée' : ' pages d’activité connectées') : '';
+    const text = counted ? 'Activités : ' + description : message;
+    if (status.textContent !== text) status.textContent = text;
+    status.title = counted ? 'Actualisé toutes les 10 secondes. Un élève peut ouvrir plusieurs pages.' : '';
+    if (connections) {
+      connections.hidden = !counted;
+      const label = counted ? viewers + (viewers === 1 ? ' connexion' : ' connexions') : '';
+      if (connections.textContent !== label) connections.textContent = label;
+      connections.setAttribute('aria-label', description);
+    }
     syncAuthUI();
   }
   function readState() {

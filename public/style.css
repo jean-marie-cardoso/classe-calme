@@ -7,3 +7,5 @@
 #relayStatus{font-size:11px;color:#6e7e68;line-height:1.5;margin:5px 0 0}
 
 #dock #mic{background:#e5eee0;border:1px solid #a8bea0;font-weight:600}#dock #mic:hover{background:#d7e6ce}#dock #mic[aria-pressed=true]{background:#a82d35;border-color:#a82d35;color:#fff}#dock #mic[aria-pressed=true]:hover{background:#90242b}
+
+#activityConnections{flex-shrink:0;font-size:11px;font-weight:600;color:#285c43;background:#edf3e8;border:1px solid #d5e2cc;border-radius:7px;padding:8px 9px;white-space:nowrap}
