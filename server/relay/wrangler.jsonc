@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "classe-calme-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "durable_objects": { "bindings": [{ "name": "CLASSROOM", "class_name": "ClassroomRelay" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ClassroomRelay"] }],
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 },
+  "vars": { "STUDENT_ORIGIN": "https://jean-marie-cardoso.github.io" }
+}
