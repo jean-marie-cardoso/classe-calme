@@ -7,7 +7,8 @@
 
   const storageKey = 'classe-calme.tools.v1';
   const defaultMessage = 'MOINS DE BRUIT, MERCI.';
-  const defaults = { silence: 40, binomes: 55, groupes: 70 };
+  const profileDefaultsVersion = 2;
+  const defaults = { silence: 12, binomes: 30, groupes: 50 };
   const bounded = (value, min, max) => Math.min(max, Math.max(min, Math.round(value)));
   const profileNames = Object.keys(defaults);
   const shortText = (value, limit) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
@@ -15,24 +16,19 @@
   const thresholds = { ...defaults };
   let message = defaultMessage;
   let duration = 30;
-  let savedProfiles = false;
   try {
     const saved = JSON.parse(localStorage.getItem(storageKey));
     if (saved && typeof saved === 'object') {
       if (Object.hasOwn(defaults, saved.profile)) selectedProfile = saved.profile;
-      for (const name of Object.keys(defaults)) {
-        if (Number.isFinite(saved.thresholds?.[name])) thresholds[name] = bounded(saved.thresholds[name], 10, 95);
+      if (saved.profileDefaultsVersion === profileDefaultsVersion) {
+        for (const name of Object.keys(defaults)) {
+          if (Number.isFinite(saved.thresholds?.[name])) thresholds[name] = bounded(saved.thresholds[name], 10, 95);
+        }
       }
-      savedProfiles = true;
       if (typeof saved.message === 'string') message = shortText(saved.message, 120) || defaultMessage;
       if ([15, 30, 60, 120].includes(saved.duration)) duration = saved.duration;
     }
   } catch { /* Le navigateur peut refuser le stockage. */ }
-  // Preserve a threshold already chosen before the profiles existed.
-  if (!savedProfiles) {
-    const existing = Number(document.getElementById('threshold')?.value);
-    if (Number.isFinite(existing)) thresholds[selectedProfile] = bounded(existing, 10, 95);
-  }
   function orderThresholds() {
     const index = profileNames.indexOf(selectedProfile);
     for (let i = 0; i < profileNames.length; i++) thresholds[profileNames[i]] = bounded(thresholds[profileNames[i]], 10 + i, 93 + i);
@@ -54,8 +50,8 @@
         <button type="button" data-noise-profile="binomes" aria-pressed="false">Binômes</button>
         <button type="button" data-noise-profile="groupes" aria-pressed="false">Groupes</button>
       </div>
-      <label class="tools-range-label" for="profileThreshold">Seuil <output id="profileThresholdValue">55</output></label>
-      <input id="profileThreshold" type="range" min="10" max="95" value="55">
+      <label class="tools-range-label" for="profileThreshold">Seuil <output id="profileThresholdValue">30</output></label>
+      <input id="profileThreshold" type="range" min="10" max="95" value="30">
     </section>
     <section class="tool-section" aria-labelledby="timerHeading">
       <h3 id="timerHeading">Minuteur</h3>
@@ -134,7 +130,7 @@
   let lastTimerLabel = '';
 
   function save() {
-    try { localStorage.setItem(storageKey, JSON.stringify({ profile: selectedProfile, thresholds, message, duration })); }
+    try { localStorage.setItem(storageKey, JSON.stringify({ profileDefaultsVersion, profile: selectedProfile, thresholds, message, duration })); }
     catch { /* Les outils fonctionnent aussi sans stockage. */ }
   }
   function broadcastChanged() { document.dispatchEvent(new Event('classe-calme:state')); }
