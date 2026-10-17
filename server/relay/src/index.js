@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 const TTL = 35000;
 const MESSAGE = 'MOINS DE BRUIT, MERCI.';
+const NOTICE_MAX_LIFETIME = 180000;
 const HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: HEADERS });
 
@@ -61,6 +62,14 @@ function channelName(url) {
   if (value !== 'main' && !/^test-[a-z0-9-]{8,70}$/.test(value)) return null;
   return value;
 }
+function activityName(value) {
+  // L'identifiant décrit la page, jamais la personne ni ses réponses.
+  return typeof value === 'string' && value.length <= 64 &&
+    /^(?:[345]\/\d{2}|bonus\/[345]-\d{2}|accueil|autre|[a-z0-9][a-z0-9-]*(?:\/[a-z0-9][a-z0-9-]*){0,2})$/.test(value) ? value : 'autre';
+}
+function plainText(value, limit) {
+  return typeof value === 'string' && value.length <= limit && !/[\u0000-\u001f\u007f]/.test(value);
+}
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -108,7 +117,22 @@ export class ClassroomRelay extends DurableObject {
   }
   publicState(state, now = Date.now()) {
     const active = Boolean(state?.expiresAt > now);
-    return { type: 'state', v: 1, active, alarm: active && state.alarm, mode: state?.mode || 'cover', pulse: state?.pulse ?? false, message: MESSAGE, remainingMs: active ? Math.min(TTL, state.expiresAt - now) : 0 };
+    const remainingMs = active ? Math.min(TTL, state.expiresAt - now) : 0;
+    const notice = active && state.notice?.until > now ? {
+      text: state.notice.text,
+      remainingMs: Math.min(remainingMs, state.notice.until - now)
+    } : null;
+    return { type: 'state', v: 1, active, alarm: Boolean(active && state.alarm), mode: state?.mode || 'cover', pulse: state?.pulse ?? false, message: state?.message || MESSAGE, notice, remainingMs };
+  }
+  teacherStats(active) {
+    const sockets = this.ctx.getWebSockets();
+    const counts = new Map();
+    for (const socket of sockets) {
+      let activity = 'autre';
+      try { activity = activityName(socket.deserializeAttachment()?.activity); } catch { /* Anciens modules sans pièce jointe. */ }
+      counts.set(activity, (counts.get(activity) || 0) + 1);
+    }
+    return { active, viewers: sockets.length, activities: [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([id, count]) => ({ id, count })) };
   }
   broadcast(state) {
     const message = JSON.stringify(this.publicState(state));
@@ -121,6 +145,7 @@ export class ClassroomRelay extends DurableObject {
       if (this.ctx.getWebSockets().length >= 500) return json({ error: 'full' }, 503);
       const [client, server] = Object.values(new WebSocketPair());
       this.ctx.acceptWebSocket(server);
+      server.serializeAttachment({ activity: activityName(new URL(request.url).searchParams.get('activity')) });
       server.send(JSON.stringify(this.publicState(this.stored())));
       return new Response(null, { status: 101, webSocket: client });
     }
@@ -137,19 +162,31 @@ export class ClassroomRelay extends DurableObject {
         await this.ctx.storage.deleteAlarm();
         this.broadcast(null);
       }
-      return json({ active: false, viewers: this.ctx.getWebSockets().length });
+      return json(this.teacherStats(false));
     }
     if (this.ctx.storage.sql.exec('SELECT sessionId FROM closed WHERE sessionId=?', body.sessionId).toArray().length) return json({ error: 'session_released' }, 410);
     if (body.action !== 'claim' && current?.expiresAt > now && current.sessionId !== body.sessionId) return json({ error: 'another_teacher_tab' }, 409);
     if (typeof body.alarm !== 'boolean' || !['cover', 'border'].includes(body.mode) || typeof body.pulse !== 'boolean') return json({ error: 'invalid_state' }, 400);
+    if (body.message !== undefined && !plainText(body.message, 120)) return json({ error: 'invalid_message' }, 400);
+    const message = body.message === undefined ? MESSAGE : body.message.trim() || MESSAGE;
+    let notice = current?.sessionId === body.sessionId && current.expiresAt > now && current.notice?.until > now ? current.notice : null;
+    if (body.notice !== undefined) {
+      if (body.notice === null) notice = null;
+      else {
+        if (typeof body.notice !== 'object' || !plainText(body.notice.text, 180) || !body.notice.text.trim() ||
+            !Number.isSafeInteger(body.notice.until) || body.notice.until < 0 || body.notice.until > now + NOTICE_MAX_LIFETIME) return json({ error: 'invalid_notice' }, 400);
+        // Le battement de présence conserve cette date absolue ; il ne prolonge pas la consigne.
+        notice = body.notice.until > now ? { text: body.notice.text.trim(), until: body.notice.until } : null;
+      }
+    }
     if (body.action === 'claim' && current?.expiresAt > now && current.sessionId !== body.sessionId) {
       this.ctx.storage.sql.exec('INSERT INTO closed(sessionId,expiresAt) VALUES(?,?) ON CONFLICT(sessionId) DO UPDATE SET expiresAt=excluded.expiresAt', current.sessionId, now + 120000);
     }
-    const state = { sessionId: body.sessionId, expiresAt: now + TTL, alarm: body.alarm, mode: body.mode, pulse: body.pulse };
+    const state = { sessionId: body.sessionId, expiresAt: now + TTL, alarm: body.alarm, mode: body.mode, pulse: body.pulse, message, notice };
     this.ctx.storage.sql.exec('INSERT INTO state(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', JSON.stringify(state));
     await this.ctx.storage.setAlarm(state.expiresAt);
     this.broadcast(state);
-    return json({ active: true, viewers: this.ctx.getWebSockets().length });
+    return json(this.teacherStats(true));
   }
   async alarm() {
     const state = this.stored();

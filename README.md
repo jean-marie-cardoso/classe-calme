@@ -10,11 +10,15 @@ Cette seconde adresse propose la projection, les onglets, le micro et les alerte
 
 Les PDF et le son sont traités dans le navigateur. Le micro demande son autorisation habituelle. Aucun son ni PDF n’est envoyé au relais.
 
+Le bouton **Outils** ouvre le minuteur, les profils Silence / Binômes / Groupes, les consignes temporaires et le texte personnalisable de l’alerte. Les seuils et le texte sont mémorisés dans le navigateur. La poignée permet de déplacer la barre ; **−** la réduit à la jauge et aux indicateurs utiles. Ces outils sont présents dans les deux versions.
+
 ## Activités des élèves
 
 Les pages du [labo techno](https://jean-marie-cardoso.github.io/labo-techno/) reçoivent automatiquement les alertes. Pour autoriser l’envoi, la page professeur utilise la connexion privée existante de Classe calme, puis revient sur GitHub. L’autorisation dure au maximum huit heures dans cet onglet. Le bouton « Connecter » des réglages permet de la renouveler. La projection et le micro fonctionnent aussi sans liaison.
 
 Les liens d’activité habituels ne changent pas. La liaison est commune à toutes les activités : une activité ouverte hors de la salle peut aussi recevoir l’alerte. Quand le professeur ferme la page, l’alerte est libérée ; sans réseau, elle expire au plus tard après 35 secondes.
+
+Dans la version personnelle, les consignes et le texte de l’alerte sont aussi envoyés aux activités. Cliquer sur le nombre de connexions affiche leur répartition par activité. Il s’agit de pages ouvertes, pas de personnes : plusieurs onglets peuvent compter plusieurs fois. Ce détail reste réservé au professeur. La version à partager affiche les consignes uniquement sur la projection.
 
 ## Sources et publication
 

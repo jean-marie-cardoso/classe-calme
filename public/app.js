@@ -24,6 +24,7 @@ function setThreshold(value, save = true) {
   $('mark').style.left = threshold + '%';
   loudSince = quietSince = null;
   if (save) savePreferences();
+  document.dispatchEvent(new Event('classe-calme:threshold'));
 }
 function restorePreferences() {
   try {
@@ -44,10 +45,10 @@ function notify(message) {
 function tabPicker(open) {
   $('tabPicker').hidden = !open;
   $('toggleTabs').setAttribute('aria-expanded', String(open));
-  if (open) { settings(false); $('webForm').hidden = true; }
+  if (open) { settings(false); window.ClasseCalmeTools?.closePanel(); document.dispatchEvent(new Event('classe-calme:close-connections')); $('webForm').hidden = true; }
 }
 function settings(open) {
-  if (open) { tabPicker(false); $('webForm').hidden = true; }
+  if (open) { tabPicker(false); window.ClasseCalmeTools?.closePanel(); document.dispatchEvent(new Event('classe-calme:close-connections')); $('webForm').hidden = true; }
   $('settings').hidden = !open;
   $('settingsButton').setAttribute('aria-expanded', String(open));
 }
@@ -156,7 +157,7 @@ function addFiles(files) {
   if (skipped) notify('Choisissez des fichiers PDF.');
 }
 function openWebForm() {
-  settings(false); tabPicker(false);
+  settings(false); tabPicker(false); window.ClasseCalmeTools?.closePanel(); document.dispatchEvent(new Event('classe-calme:close-connections'));
   $('webForm').hidden = false;
   $('webError').textContent = '';
   $('webUrl').focus();
@@ -258,7 +259,7 @@ function tick() {
       if (now - quietSince >= 3000) showAlarm(false);
     } else quietSince = null;
   }
-  $('badgeText').textContent = alarmed ? 'Moins de bruit, merci.' : loudSince !== null ? 'Bruit élevé…' : 'Micro actif';
+  $('badgeText').textContent = alarmed ? 'Bruit élevé' : loudSince !== null ? 'Bruit élevé…' : 'Micro actif';
 }
 async function stop() {
   microphoneSession++;
@@ -340,7 +341,7 @@ async function microphone() {
 function updateProjection(on) {
   projection = on;
   document.body.classList.toggle('tabs-hidden', on);
-  tabPicker(false); settings(false);
+  tabPicker(false); settings(false); window.ClasseCalmeTools?.closePanel(); document.dispatchEvent(new Event('classe-calme:close-connections'));
   $('webForm').hidden = true;
   $('fullscreen').textContent = on ? '⛶ Quitter' : '⛶ Projeter';
 }

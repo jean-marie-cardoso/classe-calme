@@ -14,6 +14,7 @@
   let heartbeatTimer = null;
   let requestController = null;
   let hidden = false;
+  let activityStats = [];
 
   function endpoint(path, channel) {
     const url = new URL(path, relayOrigin);
@@ -23,7 +24,7 @@
   function syncAuthUI() {
     connectButton.hidden = Boolean(auth?.getGrant());
   }
-  function setStatus(message, viewers) {
+  function setStatus(message, viewers, activities) {
     const counted = message === 'Activités : reliées' && Number.isInteger(viewers) && viewers >= 0;
     const description = counted ? viewers + (viewers === 1 ? ' page d’activité connectée' : ' pages d’activité connectées') : '';
     const text = counted ? 'Activités : ' + description : message;
@@ -35,15 +36,62 @@
       if (connections.textContent !== label) connections.textContent = label;
       connections.setAttribute('aria-label', description);
     }
+    activityStats = counted && Array.isArray(activities) ? activities.filter(item => item && typeof item.id === 'string' && item.id.length <= 40 && Number.isInteger(item.count) && item.count > 0).slice(0, 100) : [];
+    if (!counted) showConnections(false);
+    renderConnections();
     syncAuthUI();
   }
   function readState() {
     return {
       alarm: !document.getElementById('alarm').hidden,
       mode: document.getElementById('mode').value === 'border' ? 'border' : 'cover',
-      pulse: document.getElementById('pulse').checked
+      pulse: document.getElementById('pulse').checked,
+      ...(window.ClasseCalmeTools?.getBroadcastState?.() || {})
     };
   }
+  function activityName(id) {
+    if (id === 'accueil') return 'Accueil du labo';
+    const sequence = /^([345])\/(\d{2})$/.exec(id);
+    if (sequence) return sequence[1] + 'e · Activité ' + sequence[2];
+    const bonus = /^bonus\/([345])-(\d{2})$/.exec(id);
+    if (bonus) return 'Bonus ' + bonus[1] + 'e · ' + bonus[2];
+    return 'Autres pages';
+  }
+  function renderConnections() {
+    const container = document.getElementById('activityBreakdown');
+    if (!container) return;
+    container.replaceChildren();
+    if (!activityStats.length) {
+      const empty = document.createElement('p');
+      empty.className = 'hint';
+      empty.textContent = 'Aucune page connectée.';
+      container.append(empty);
+    }
+    for (const item of [...activityStats].sort((a, b) => a.id.localeCompare(b.id))) {
+      const row = document.createElement('div');
+      row.className = 'activity-row';
+      const name = document.createElement('span');
+      name.textContent = activityName(item.id);
+      const count = document.createElement('strong');
+      count.textContent = item.count;
+      row.append(name, count);
+      container.append(row);
+    }
+  }
+  function showConnections(open) {
+    const panel = document.getElementById('activitySummary');
+    if (!panel) return;
+    if (open) { window.settings?.(false); window.tabPicker?.(false); window.ClasseCalmeTools?.closePanel(); }
+    panel.hidden = !open;
+    connections?.setAttribute('aria-expanded', String(open));
+  }
+  connections?.addEventListener('click', () => {
+    renderConnections();
+    showConnections(document.getElementById('activitySummary').hidden);
+  });
+  document.getElementById('closeActivities')?.addEventListener('click', () => { showConnections(false); connections?.focus(); });
+  document.addEventListener('classe-calme:close-connections', () => showConnections(false));
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') showConnections(false); });
   function clearTimers() {
     clearTimeout(retryTimer);
     clearTimeout(heartbeatTimer);
@@ -132,7 +180,7 @@
       if (typeof result.active !== 'boolean') throw new Error('relay');
       current.claimed = true;
       current.retryDelay = 1000;
-      setStatus(result.active ? 'Activités : reliées' : 'Activités : hors ligne', result.viewers);
+      setStatus(result.active ? 'Activités : reliées' : 'Activités : hors ligne', result.viewers, result.activities);
       heartbeatTimer = setTimeout(() => {
         heartbeatTimer = null;
         queueState();
