@@ -128,12 +128,31 @@
   let remainingMs = 5 * 60000;
   let deadline = 0;
   let lastTimerLabel = '';
+  let following = false;
+  let applyingBroadcast = false;
 
   function save() {
     try { localStorage.setItem(storageKey, JSON.stringify({ profileDefaultsVersion, profile: selectedProfile, thresholds, message, duration })); }
     catch { /* Les outils fonctionnent aussi sans stockage. */ }
   }
-  function broadcastChanged() { document.dispatchEvent(new Event('classe-calme:state')); }
+  function broadcastChanged() { if (!applyingBroadcast && !following) document.dispatchEvent(new Event('classe-calme:state')); }
+  function syncFollowingControls() {
+    for (const control of panel.querySelectorAll('input, select, button')) {
+      if (control.id !== 'closeTools') control.disabled = following;
+    }
+    byId('timerMinutes').disabled = following || timerState === 'running' || timerState === 'paused';
+    byId('clearClassNotice').disabled = following || !currentNotice;
+    hideNoticeButton.disabled = following;
+    panel.classList.toggle('tools-following', following);
+    if (following) feedback('Prends la main pour modifier.');
+    else if (byId('toolsFeedback').textContent === 'Prends la main pour modifier.') feedback('');
+  }
+  for (const name of ['click', 'input', 'change', 'submit']) panel.addEventListener(name, event => {
+    if (!following || event.target.closest?.('#closeTools')) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    document.dispatchEvent(new Event('classe-calme:request-control'));
+  }, true);
   function feedback(text) { byId('toolsFeedback').textContent = text; }
   function closePanel(returnFocus = false) {
     panel.hidden = true;
@@ -230,7 +249,7 @@
     currentNotice = { text, until: Date.now() + duration * 1000 };
     noticeText.textContent = text;
     notice.hidden = false;
-    byId('clearClassNotice').disabled = false;
+    byId('clearClassNotice').disabled = following;
     save();
     broadcastChanged();
   }
@@ -268,7 +287,7 @@
     timerBadge.classList.toggle('timer-finished', timerState === 'finished');
     timerBadge.classList.toggle('timer-paused', timerState === 'paused');
     byId('timerStart').textContent = timerState === 'running' ? 'Pause' : timerState === 'paused' ? 'Reprendre' : 'Démarrer';
-    byId('timerMinutes').disabled = timerState === 'running' || timerState === 'paused';
+    byId('timerMinutes').disabled = following || timerState === 'running' || timerState === 'paused';
   }
   byId('lessonTimerForm').addEventListener('submit', event => {
     event.preventDefault();
@@ -313,8 +332,65 @@
       notice: currentNotice && currentNotice.until > Date.now() ? { ...currentNotice } : null,
       timer: timerState === 'running' ? { state: 'running', until: deadline } :
         timerState === 'paused' ? { state: 'paused', remainingMs } :
-        timerState === 'finished' ? { state: 'finished', remainingMs: 0 } : null
+        timerState === 'finished' ? { state: 'finished', remainingMs: 0 } : null,
+      preferences: {
+        threshold: Number(byId('threshold')?.value) || thresholds[selectedProfile],
+        delay: Number(byId('delay')?.value) || 3,
+        mode: byId('mode')?.value === 'border' ? 'border' : 'cover',
+        pulse: Boolean(byId('pulse')?.checked)
+      }
     }),
+    applyBroadcastState(value, options = {}) {
+      if (!value || typeof value !== 'object') return;
+      applyingBroadcast = true;
+      try {
+        const now = Date.now();
+        const offset = Number.isFinite(options.serverNow) ? now - options.serverNow : 0;
+        message = shortText(value.message, 120) || defaultMessage;
+        renderMessage();
+        const incomingNotice = value.notice;
+        currentNotice = incomingNotice && typeof incomingNotice.text === 'string' && Number.isFinite(incomingNotice.until) && incomingNotice.until + offset > now
+          ? { text: shortText(incomingNotice.text, 180), until: incomingNotice.until + offset } : null;
+        notice.hidden = !currentNotice;
+        noticeText.textContent = currentNotice?.text || '';
+        const incomingTimer = value.timer;
+        if (incomingTimer?.state === 'running' && Number.isFinite(incomingTimer.until)) {
+          timerState = 'running';
+          deadline = incomingTimer.until + offset;
+          remainingMs = Math.max(0, deadline - now);
+        } else if (incomingTimer?.state === 'paused' && Number.isFinite(incomingTimer.remainingMs)) {
+          timerState = 'paused';
+          remainingMs = bounded(incomingTimer.remainingMs, 0, 180 * 60000);
+        } else if (incomingTimer?.state === 'finished') {
+          timerState = 'finished';
+          remainingMs = 0;
+        } else {
+          timerState = 'idle';
+          remainingMs = bounded(Number(byId('timerMinutes').value) || 5, 1, 180) * 60000;
+        }
+        const preferences = value.preferences;
+        if (preferences && typeof preferences === 'object') {
+          if (Number.isFinite(preferences.threshold)) {
+            const threshold = bounded(preferences.threshold, 10, 95);
+            // Remote thresholds must remain exact, even when a local profile has a different name.
+            selectedProfile = profileNames.find(name => thresholds[name] === threshold) || selectedProfile;
+            const profileIndex = profileNames.indexOf(selectedProfile);
+            if (threshold < 10 + profileIndex) selectedProfile = 'silence';
+            else if (threshold > 93 + profileIndex) selectedProfile = 'groupes';
+            thresholds[selectedProfile] = threshold;
+            orderThresholds();
+            window.setThreshold?.(thresholds[selectedProfile], false);
+          }
+          if ([2, 3, 5, 8].includes(Number(preferences.delay))) byId('delay').value = String(preferences.delay);
+          if (['cover', 'border'].includes(preferences.mode)) byId('mode').value = preferences.mode;
+          if (typeof preferences.pulse === 'boolean') byId('pulse').checked = preferences.pulse;
+          renderProfile();
+        }
+        renderTimer();
+        syncFollowingControls();
+      } finally { applyingBroadcast = false; }
+    },
+    setFollowing(value) { following = Boolean(value); syncFollowingControls(); },
     openPanel,
     closePanel
   };

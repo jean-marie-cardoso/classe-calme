@@ -2,12 +2,29 @@
 const $ = id => document.getElementById(id);
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const documents = [];
+const personalDisplay = Boolean(window.ClasseCalmeAuth);
 const preferencesKey = 'classe-calme.preferences.v1';
 let activeId = null, nextId = 1, projection = false, noticeTimer;
 let stream = null, context = null, source = null, analyser = null, samples = null;
 let timer = null, starting = false, microphoneSession = 0;
 let loudSince = null, quietSince = null, lastTick = 0, pausedUntil = 0;
 let testUntil = 0, alarmed = false, level = 0, calibration = null;
+let following = false, applyingDisplay = false, remoteNoise = null, lastNoiseEvent = 0;
+let sampledAlarm = false, remotePauseUntil = 0, remoteTestUntil = 0;
+
+function canEditDisplay() {
+  if (!following || applyingDisplay) return true;
+  document.dispatchEvent(new Event('classe-calme:request-control'));
+  return false;
+}
+function displayChanged() {
+  if (personalDisplay && !applyingDisplay) document.dispatchEvent(new Event('classe-calme:display'));
+}
+function emitNoise(force = false) {
+  if (!force && performance.now() - lastNoiseEvent < 250) return;
+  lastNoiseEvent = performance.now();
+  document.dispatchEvent(new CustomEvent('classe-calme:noise', { detail: { level: Math.round(level), alarm: stream ? sampledAlarm : alarmed } }));
+}
 
 function savePreferences() {
   try {
@@ -78,6 +95,8 @@ function renderTabChoices() {
   }
 }
 function selectTab(id) {
+  if (!canEditDisplay()) return;
+  const changed = activeId !== id;
   activeId = id;
   for (const doc of documents) {
     const selected = doc.id === id;
@@ -85,6 +104,7 @@ function selectTab(id) {
     doc.tab.classList.toggle('active', selected);
     doc.button.setAttribute('aria-selected', String(selected));
     doc.button.tabIndex = selected ? 0 : -1;
+    if (!selected) doc.reader?.deactivate();
   }
   $('empty').hidden = documents.length > 0;
   $('panels').hidden = documents.length === 0;
@@ -92,30 +112,40 @@ function selectTab(id) {
   $('webTools').hidden = current?.kind !== 'web';
   if (current?.kind === 'web') $('externalWeb').href = current.url;
   renderTabChoices();
+  current?.reader?.activate();
+  if (changed) displayChanged();
 }
 function closeTab(id) {
+  if (!canEditDisplay()) return;
   const index = documents.findIndex(doc => doc.id === id);
   if (index < 0) return;
   const [doc] = documents.splice(index, 1);
   doc.panel.remove();
   doc.tab.remove();
-  if (doc.kind === 'pdf') URL.revokeObjectURL(doc.url);
+  doc.reader?.destroy();
+  if (doc.kind === 'pdf' && doc.url?.startsWith('blob:')) URL.revokeObjectURL(doc.url);
   selectTab(activeId === id ? documents[Math.min(index, documents.length - 1)]?.id ?? null : activeId);
+  displayChanged();
 }
-function addDocument(kind, title, url) {
-  const id = nextId++;
+function addDocument(kind, title, url, options = {}) {
+  if (!canEditDisplay()) return null;
+  if (personalDisplay && documents.length >= 50) { notify('50 onglets maximum. Fermez un document.'); return null; }
+  const id = options.id ?? (personalDisplay ? crypto.randomUUID() : nextId++);
   const panel = document.createElement('div');
   panel.className = 'panel';
   panel.id = 'panel-' + id;
   panel.setAttribute('role', 'tabpanel');
-  const frame = document.createElement('iframe');
-  frame.title = title;
-  if (kind === 'web') {
-    frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-downloads');
-    frame.referrerPolicy = 'no-referrer';
+  let frame = null;
+  if (kind === 'web' || !personalDisplay || !window.ClasseCalmePdf) {
+    frame = document.createElement('iframe');
+    frame.title = title;
+    if (kind === 'web') {
+      frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-downloads');
+      frame.referrerPolicy = 'no-referrer';
+    }
+    frame.src = url || 'about:blank';
+    panel.append(frame);
   }
-  frame.src = url;
-  panel.append(frame);
   $('panels').append(panel);
   const tab = document.createElement('div');
   tab.className = 'tab';
@@ -143,20 +173,31 @@ function addDocument(kind, title, url) {
   close.onclick = () => { closeTab(id); documents.find(doc => doc.id === activeId)?.button.focus(); };
   tab.append(button, close);
   $('tabs').append(tab);
-  documents.push({ id, kind, title, url, panel, frame, tab, button });
+  const doc = { id, kind, title, url, panel, frame, tab, button, fileId: options.fileId ?? (kind === 'pdf' && personalDisplay ? crypto.randomUUID() : undefined), originalBlob: options.blob ?? null, reader: null, loadingFile: null };
+  if (kind === 'pdf' && personalDisplay && window.ClasseCalmePdf) {
+    doc.reader = window.ClasseCalmePdf.create(panel, { canChange: canEditDisplay, onChange: displayChanged });
+    doc.reader.setState({ page: options.page ?? 1, zoom: options.zoom ?? 'fit' });
+    if (doc.originalBlob) doc.reader.load(doc.originalBlob);
+  }
+  documents.push(doc);
   selectTab(id);
   button.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  displayChanged();
+  return doc;
 }
 function addFiles(files) {
+  if (!canEditDisplay()) return;
   let skipped = false;
   for (const file of files) {
     if (file.type === 'application/pdf' || /\.pdf$/i.test(file.name)) {
-      addDocument('pdf', file.name, URL.createObjectURL(file));
+      if (personalDisplay && file.size > 15 * 1024 * 1024) { notify('PDF trop volumineux : 15 Mo maximum.'); continue; }
+      addDocument('pdf', file.name, personalDisplay ? null : URL.createObjectURL(file), { blob: file });
     } else skipped = true;
   }
   if (skipped) notify('Choisissez des fichiers PDF.');
 }
 function openWebForm() {
+  if (!canEditDisplay()) return;
   settings(false); tabPicker(false); window.ClasseCalmeTools?.closePanel(); document.dispatchEvent(new Event('classe-calme:close-connections'));
   $('webForm').hidden = false;
   $('webError').textContent = '';
@@ -170,21 +211,22 @@ function parseWebUrl(value) {
   if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) throw new Error('https');
   return url;
 }
-function showAlarm(on) {
+function showAlarm(on, broadcast = true) {
   const className = ($('mode').value === 'border' ? 'border ' : '') + ($('pulse').checked ? 'pulsing' : '');
   const changed = alarmed !== on || $('alarm').className !== className;
-  if (alarmed !== on) { loudSince = quietSince = null; }
+  if (alarmed !== on && broadcast) { loudSince = quietSince = null; }
   alarmed = on;
   $('alarm').hidden = !on;
   $('alarm').className = className;
-  if (changed) document.dispatchEvent(new Event('classe-calme:state'));
+  if (changed && broadcast) document.dispatchEvent(new Event('classe-calme:state'));
 }
 function updatePause(now) {
-  const paused = now < pausedUntil;
+  const visibleUntil = Math.max(pausedUntil, remotePauseUntil);
+  const paused = now < visibleUntil;
   $('pause').textContent = paused ? 'Reprendre' : 'Pause 30 s';
   $('pause').setAttribute('aria-pressed', String(paused));
-  if (paused) $('badgeText').textContent = 'Pause · ' + Math.ceil((pausedUntil - now) / 1000) + ' s';
-  return paused;
+  if (paused) $('badgeText').textContent = 'Pause · ' + Math.ceil((visibleUntil - now) / 1000) + ' s';
+  return now < pausedUntil;
 }
 function pause() {
   pausedUntil = performance.now() + 30000;
@@ -203,7 +245,7 @@ function togglePause() {
     if (stream) tick();
   } else pause();
 }
-function tick() {
+function sampleNoise() {
   const now = performance.now();
   if (now - lastTick > 700) loudSince = quietSince = null;
   lastTick = now;
@@ -261,7 +303,23 @@ function tick() {
   }
   $('badgeText').textContent = alarmed ? 'Bruit élevé' : loudSince !== null ? 'Bruit élevé…' : 'Micro actif';
 }
+function applyRemoteOverrides() {
+  const now = performance.now();
+  if (now < remotePauseUntil) {
+    showAlarm(false, false);
+    $('badgeText').textContent = 'Pause · ' + Math.ceil((remotePauseUntil - now) / 1000) + ' s';
+  } else if (now < remoteTestUntil) showAlarm(true, false);
+  else showAlarm(sampledAlarm, false);
+}
+function tick() {
+  if (stream) alarmed = sampledAlarm;
+  sampleNoise();
+  if (stream) sampledAlarm = alarmed;
+  emitNoise();
+  if (stream) applyRemoteOverrides();
+}
 async function stop() {
+  const wasActive = Boolean(stream);
   microphoneSession++;
   starting = false;
   if (timer) clearInterval(timer);
@@ -275,6 +333,7 @@ async function stop() {
   loudSince = quietSince = null;
   pausedUntil = testUntil = 0;
   level = 0;
+  sampledAlarm = false;
   showAlarm(false);
   document.body.classList.remove('listening');
   $('mic').textContent = 'Activer micro';
@@ -284,6 +343,9 @@ async function stop() {
   document.querySelector('.meter').setAttribute('aria-valuenow', '0');
   $('calibrate').disabled = $('pause').disabled = true;
   updatePause(performance.now());
+  if (wasActive) document.dispatchEvent(new CustomEvent('classe-calme:microphone', { detail: { active: false } }));
+  emitNoise(true);
+  if (remoteNoise) setRemoteNoise(remoteNoise);
   if (oldContext) await oldContext.close().catch(() => {});
 }
 async function microphone() {
@@ -320,9 +382,11 @@ async function microphone() {
       notify('Micro déconnecté. Rebranchez-le puis réactivez.');
     };
     document.body.classList.add('listening');
+    sampledAlarm = false;
     $('mic').setAttribute('aria-pressed', 'true');
     $('calibrate').disabled = $('pause').disabled = false;
     lastTick = performance.now();
+    document.dispatchEvent(new CustomEvent('classe-calme:microphone', { detail: { active: true } }));
     timer = setInterval(tick, 100);
     tick();
   } catch (error) {
@@ -343,14 +407,96 @@ function updateProjection(on) {
   document.body.classList.toggle('tabs-hidden', on);
   tabPicker(false); settings(false); window.ClasseCalmeTools?.closePanel(); document.dispatchEvent(new Event('classe-calme:close-connections'));
   $('webForm').hidden = true;
-  $('fullscreen').textContent = on ? '⛶ Quitter' : '⛶ Projeter';
+  $('fullscreen').textContent = on && (!personalDisplay || document.fullscreenElement) ? '⛶ Quitter' : '⛶ Projeter';
 }
+
+function getDisplayState() {
+  return {
+    documents: documents.map(doc => doc.kind === 'pdf'
+      ? { id: doc.id, kind: 'pdf', title: doc.title, fileId: doc.fileId, ...(doc.reader?.getState() ?? { page: 1, zoom: 'fit' }) }
+      : { id: doc.id, kind: 'web', title: doc.title, url: doc.url }),
+    activeId
+  };
+}
+async function applyDisplayState(state, loadFile) {
+  if (!personalDisplay || !state || !Array.isArray(state.documents)) return;
+  const desired = state.documents.slice(0, 50), desiredIds = new Set(desired.map(doc => doc.id));
+  const fileTasks = [];
+  applyingDisplay = true;
+  try {
+    for (const doc of [...documents]) if (!desiredIds.has(doc.id)) closeTab(doc.id);
+    const ordered = [];
+    for (const descriptor of desired) {
+      let doc = documents.find(item => item.id === descriptor.id);
+      if (doc && (doc.kind !== descriptor.kind || (doc.kind === 'pdf' ? doc.fileId !== descriptor.fileId : doc.url !== descriptor.url))) {
+        closeTab(doc.id); doc = null;
+      }
+      if (!doc) doc = addDocument(descriptor.kind, descriptor.title, descriptor.url ?? null, descriptor);
+      if (!doc) continue;
+      doc.title = descriptor.title;
+      doc.button.textContent = (doc.kind === 'pdf' ? '▤ ' : '↗ ') + doc.title;
+      doc.button.title = doc.title;
+      doc.reader?.setState({ page: descriptor.page ?? 1, zoom: descriptor.zoom ?? 'fit' });
+      ordered.push(doc);
+      if (doc.kind === 'pdf' && !doc.originalBlob && typeof loadFile === 'function') {
+        if (!doc.loadingFile) {
+          doc.loadingFile = Promise.resolve().then(() => loadFile(doc.fileId)).then(blob => {
+            if (!documents.includes(doc) || !(blob instanceof Blob)) return;
+            doc.originalBlob = blob;
+            return doc.reader?.load(blob);
+          }).catch(() => { if (documents.includes(doc)) doc.reader?.error(); }).finally(() => { doc.loadingFile = null; });
+        }
+        fileTasks.push(doc.loadingFile);
+      }
+    }
+    documents.splice(0, documents.length, ...ordered);
+    // Ne pas déplacer les iframes : cela rechargerait le site déjà ouvert.
+    for (let index = 0; index < documents.length; index++) {
+      const tab = documents[index].tab;
+      if ($('tabs').children[index] !== tab) $('tabs').insertBefore(tab, $('tabs').children[index] ?? null);
+    }
+    selectTab(documents.some(doc => doc.id === state.activeId) ? state.activeId : documents[0]?.id ?? null);
+  } finally { applyingDisplay = false; }
+  await Promise.allSettled(fileTasks);
+}
+function setRemoteNoise(noise, preferences, options = {}) {
+  if (preferences) {
+    const threshold = clamp(Math.round(Number(preferences.threshold) || 12), 10, 95);
+    for (const id of ['threshold', 'quickThreshold']) $(id).value = threshold;
+    for (const id of ['thresholdValue', 'quickThresholdValue']) $(id).textContent = threshold;
+    $('mark').style.left = threshold + '%';
+    if (['2', '3', '5', '8'].includes(String(preferences.delay))) $('delay').value = String(preferences.delay);
+    if (['cover', 'border'].includes(preferences.mode)) $('mode').value = preferences.mode;
+    if (typeof preferences.pulse === 'boolean') $('pulse').checked = preferences.pulse;
+  }
+  remoteNoise = noise && { ...noise, level: clamp(Number(noise.level) || 0, 0, 100), alarm: noise.alarm === true };
+  const serverNow = Number.isFinite(options.serverNow) ? options.serverNow : Date.now();
+  remotePauseUntil = remoteNoise?.pausedUntil > serverNow ? performance.now() + Math.min(60000, remoteNoise.pausedUntil - serverNow) : 0;
+  remoteTestUntil = remoteNoise?.testUntil > serverNow ? performance.now() + Math.min(10000, remoteNoise.testUntil - serverNow) : 0;
+  if (stream) { applyRemoteOverrides(); return; }
+  level = remoteNoise?.level ?? 0;
+  $('level').style.width = level + '%';
+  document.querySelector('.meter').setAttribute('aria-valuenow', Math.round(level));
+  const threshold = +$('threshold').value;
+  $('level').style.background = level >= threshold ? '#cf3e32' : level >= threshold - 10 ? '#d69c30' : '#73a759';
+  $('badgeText').textContent = remoteNoise ? (remoteNoise.alarm ? 'Bruit élevé' : 'Micro connecté') : 'Micro arrêté';
+  showAlarm(remoteNoise?.alarm ?? false, false);
+}
+window.ClasseCalmeDisplay = {
+  getState: getDisplayState,
+  getFile: fileId => documents.find(doc => doc.fileId === fileId)?.originalBlob ?? null,
+  applyState: applyDisplayState,
+  setFollowing(value) { following = Boolean(value); document.body.classList.toggle('remote-following', following); },
+  setRemoteNoise,
+  stopMicrophone: stop,
+  getMicrophoneState: () => Boolean(stream)
+};
 
 $('threshold').oninput = () => setThreshold(+$('threshold').value);
 $('quickThreshold').oninput = () => setThreshold(+$('quickThreshold').value);
 $('mode').onchange = $('pulse').onchange = () => { showAlarm(alarmed); savePreferences(); };
 $('delay').onchange = () => { loudSince = null; savePreferences(); };
-$('openPdf').onclick = $('topPdf').onclick = () => $('pdf').click();
+$('openPdf').onclick = $('topPdf').onclick = () => { if (canEditDisplay()) $('pdf').click(); };
 $('pdf').onchange = () => { addFiles($('pdf').files); $('pdf').value = ''; };
 $('addWeb').onclick = $('emptyWeb').onclick = openWebForm;
 $('cancelWeb').onclick = () => { $('webForm').hidden = true; };
@@ -358,6 +504,7 @@ $('webForm').onsubmit = event => {
   event.preventDefault();
   try {
     const url = parseWebUrl($('webUrl').value);
+    if (!canEditDisplay()) return;
     addDocument('web', url.hostname, url.href);
     $('webForm').hidden = true;
     $('webUrl').value = '';
@@ -366,7 +513,7 @@ $('webForm').onsubmit = event => {
 $('reloadWeb').onclick = () => { const doc = documents.find(doc => doc.id === activeId); if (doc) doc.frame.src = doc.url; };
 $('toggleTabs').onclick = () => { renderTabChoices(); tabPicker($('tabPicker').hidden); };
 $('closePicker').onclick = () => { tabPicker(false); $('toggleTabs').focus(); };
-$('pickerPdf').onclick = () => { tabPicker(false); $('pdf').click(); };
+$('pickerPdf').onclick = () => { if (canEditDisplay()) { tabPicker(false); $('pdf').click(); } };
 $('pickerWeb').onclick = openWebForm;
 $('settingsButton').onclick = () => settings($('settings').hidden);
 $('closeSettings').onclick = () => { settings(false); $('settingsButton').focus(); };
@@ -383,7 +530,7 @@ $('calibrate').onclick = () => {
   showAlarm(false);
 };
 $('fullscreen').onclick = async () => {
-  if (projection) {
+  if (projection && (!personalDisplay || document.fullscreenElement)) {
     if (document.fullscreenElement) { try { await document.exitFullscreen(); } catch {} }
     updateProjection(false);
   } else {
@@ -391,7 +538,10 @@ $('fullscreen').onclick = async () => {
     try { await document.documentElement.requestFullscreen(); } catch { /* Projection dans la fenêtre. */ }
   }
 };
-document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && projection) updateProjection(false); });
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && projection) updateProjection(false);
+  else if (document.fullscreenElement && projection) $('fullscreen').textContent = '⛶ Quitter';
+});
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape') {
     tabPicker(false); settings(false); $('webForm').hidden = true;
@@ -399,7 +549,7 @@ document.addEventListener('keydown', event => {
     if (projection && !document.fullscreenElement) updateProjection(false);
   }
 });
-setInterval(() => { if (!stream && alarmed && performance.now() >= testUntil) showAlarm(false); }, 100);
+setInterval(() => { if (!stream && !remoteNoise && alarmed && performance.now() >= testUntil) showAlarm(false); }, 100);
 // Arrêter le micro en quittant la page. Les PDF restent valides si le navigateur restaure la page.
 window.addEventListener('pagehide', () => { stop(); });
 restorePreferences();

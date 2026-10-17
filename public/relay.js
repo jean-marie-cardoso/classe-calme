@@ -1,64 +1,64 @@
 (() => {
   'use strict';
-  const checkbox = document.getElementById('linkActivities');
-  const status = document.getElementById('relayStatus');
-  const connections = document.getElementById('activityConnections');
-  const connectButton = document.getElementById('connectActivities');
   const auth = window.ClasseCalmeAuth;
-  const storageKey = 'classe-calme.link-activities.v1';
+  const display = window.ClasseCalmeDisplay;
+  const tools = window.ClasseCalmeTools;
+  if (!auth || !display) return;
+  const byId = id => document.getElementById(id);
+  const checkbox = byId('linkActivities');
+  const status = byId('relayStatus');
+  const connections = byId('activityConnections');
+  const connectButton = byId('connectActivities');
   const relayOrigin = 'https://classe-calme-relay.cardosojm.workers.dev';
-  const releases = [];
-  let session = null;
-  let inFlight = false;
-  let retryTimer = null;
-  let heartbeatTimer = null;
-  let requestController = null;
-  let hidden = false;
-  let activityStats = [];
+  const storageKey = 'classe-calme.link-activities.v1';
+  const deviceId = crypto.randomUUID();
+  const deviceLabel = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? 'Mac' : /Win/.test(navigator.platform || navigator.userAgent) ? 'PC' : 'Appareil';
+  const chunkSize = 256 * 1024;
+  const maxFileSize = 15 * 1024 * 1024;
+  const pending = new Map(), uploading = new Map(), knownFiles = new Set(), downloaded = new Map();
+  const roomWaiters = new Set();
+  let socket = null, generation = 0, reconnectTimer = null, pingTimer = null;
+  let retryDelay = 1000, hidden = false, received = false, initialized = false;
+  let room = null, highestRevision = -1, applyingTools = false, activityStats = [];
+  let displayVersion = 0, displaySent = 0, displayBusy = false, displayApplyBusy = false, appliedDisplay = '';
+  let toolsVersion = 0, toolsSent = 0, toolsBusy = false, appliedTools = '', toolTimer = null;
+  let transferController = new AbortController(), clockOffset = 0;
+  let micAttempt = 0, micClaimPending = false, localMicIntent = false, latestNoise = { level: 0, alarm: false };
+  let noiseTimer = null, lastNoiseSent = 0, micOwned = false;
+  let takingControl = false, errorMessage = '';
+  let controllerLocalDisplay = false, controllerLocalTools = false;
 
-  function endpoint(path, channel) {
+  const control = document.createElement('button');
+  control.id = 'remoteControl';
+  control.type = 'button';
+  control.textContent = 'Prendre la main';
+  byId('dock').insertBefore(control, byId('mic'));
+  const remoteStatus = document.createElement('p');
+  remoteStatus.id = 'remoteStatus';
+  remoteStatus.setAttribute('role', 'status');
+  const microphoneSource = document.createElement('p');
+  microphoneSource.id = 'microphoneSource';
+  microphoneSource.setAttribute('role', 'status');
+  status.before(remoteStatus, microphoneSource);
+
+  function endpoint(path, extra = {}) {
     const url = new URL(path, relayOrigin);
+    const channel = auth.getChannel();
     if (channel && channel !== 'main') url.searchParams.set('channel', channel);
-    return url.href;
+    for (const [key, value] of Object.entries(extra)) url.searchParams.set(key, String(value));
+    return url;
   }
-  function syncAuthUI() {
-    connectButton.hidden = Boolean(auth?.getGrant());
-  }
-  function setStatus(message, viewers, activities) {
-    const counted = message === 'Activités : reliées' && Number.isInteger(viewers) && viewers >= 0;
-    const description = counted ? viewers + (viewers === 1 ? ' page d’activité connectée' : ' pages d’activité connectées') : '';
-    const text = counted ? 'Activités : ' + description : message;
-    if (status.textContent !== text) status.textContent = text;
-    status.title = counted ? 'Actualisé toutes les 10 secondes. Un élève peut ouvrir plusieurs pages.' : '';
-    if (connections) {
-      connections.hidden = !counted;
-      const label = counted ? viewers + (viewers === 1 ? ' connexion' : ' connexions') : '';
-      if (connections.textContent !== label) connections.textContent = label;
-      connections.setAttribute('aria-label', description);
-    }
-    activityStats = counted && Array.isArray(activities) ? activities.filter(item => item && typeof item.id === 'string' && item.id.length <= 40 && Number.isInteger(item.count) && item.count > 0).slice(0, 100) : [];
-    if (!counted) showConnections(false);
-    renderConnections();
-    syncAuthUI();
-  }
-  function readState() {
-    return {
-      alarm: !document.getElementById('alarm').hidden,
-      mode: document.getElementById('mode').value === 'border' ? 'border' : 'cover',
-      pulse: document.getElementById('pulse').checked,
-      ...(window.ClasseCalmeTools?.getBroadcastState?.() || {})
-    };
-  }
+  function isReady() { return received && socket?.readyState === WebSocket.OPEN && Boolean(auth.getGrant()); }
+  function isController() { return isReady() && room?.controller?.deviceId === deviceId; }
   function activityName(id) {
     if (id === 'accueil') return 'Accueil du labo';
     const sequence = /^([345])\/(\d{2})$/.exec(id);
     if (sequence) return sequence[1] + 'e · Activité ' + sequence[2];
     const bonus = /^bonus\/([345])-(\d{2})$/.exec(id);
-    if (bonus) return 'Bonus ' + bonus[1] + 'e · ' + bonus[2];
-    return 'Autres pages';
+    return bonus ? 'Bonus ' + bonus[1] + 'e · ' + bonus[2] : 'Autres pages';
   }
   function renderConnections() {
-    const container = document.getElementById('activityBreakdown');
+    const container = byId('activityBreakdown');
     if (!container) return;
     container.replaceChildren();
     if (!activityStats.length) {
@@ -79,184 +79,464 @@
     }
   }
   function showConnections(open) {
-    const panel = document.getElementById('activitySummary');
+    const panel = byId('activitySummary');
     if (!panel) return;
-    if (open) { window.settings?.(false); window.tabPicker?.(false); window.ClasseCalmeTools?.closePanel(); }
+    if (open) { window.settings?.(false); window.tabPicker?.(false); tools?.closePanel(); }
     panel.hidden = !open;
     connections?.setAttribute('aria-expanded', String(open));
   }
-  connections?.addEventListener('click', () => {
-    renderConnections();
-    showConnections(document.getElementById('activitySummary').hidden);
-  });
-  document.getElementById('closeActivities')?.addEventListener('click', () => { showConnections(false); connections?.focus(); });
+  connections?.addEventListener('click', () => { renderConnections(); showConnections(byId('activitySummary').hidden); });
+  byId('closeActivities')?.addEventListener('click', () => { showConnections(false); connections?.focus(); });
   document.addEventListener('classe-calme:close-connections', () => showConnections(false));
   document.addEventListener('keydown', event => { if (event.key === 'Escape') showConnections(false); });
-  function clearTimers() {
-    clearTimeout(retryTimer);
-    clearTimeout(heartbeatTimer);
-    retryTimer = heartbeatTimer = null;
+
+  function setError(text) { errorMessage = text; renderStatus(); }
+  function renderStatus() {
+    const ready = isReady(), controlling = isController();
+    control.textContent = controlling ? 'Télécommande' : 'Prendre la main';
+    control.dataset.role = controlling ? 'controller' : ready ? 'follower' : 'local';
+    control.setAttribute('aria-pressed', String(controlling));
+    control.disabled = takingControl;
+    control.title = controlling ? 'Cet appareil pilote les écrans reliés' : 'Piloter les écrans depuis cet appareil';
+    connectButton.hidden = Boolean(auth.getGrant());
+    remoteStatus.textContent = errorMessage || (!auth.getGrant() ? 'Connexion prof pour relier les écrans.' : !ready ? 'Écrans : connexion…' : controlling ? 'Je pilote · ' + room.devices.length + (room.devices.length > 1 ? ' écrans' : ' écran') : room.controller ? 'Écran miroir · ' + room.controller.label + ' pilote' : 'Écran miroir · prends la main');
+    microphoneSource.textContent = ready && room.microphone ? 'Micro : ' + room.microphone.label + (room.microphone.deviceId === deviceId ? ' (ici)' : '') : display.getMicrophoneState() ? 'Micro : ici' : 'Micro : arrêté';
+    const globallyPaused = ready && room.noise?.pausedUntil > Date.now() - clockOffset;
+    if (ready && controlling) {
+      byId('pause').disabled = !display.getMicrophoneState() && !room.microphone && !room.noise?.alarm && !globallyPaused;
+      byId('pause').textContent = globallyPaused ? 'Reprendre' : 'Pause 30 s';
+      byId('pause').setAttribute('aria-pressed', String(globallyPaused));
+    } else if (ready) byId('pause').disabled = globallyPaused || !display.getMicrophoneState();
+    const counted = ready && room.linkActivities;
+    checkbox.disabled = ready && !controlling;
+    status.textContent = !counted ? ready ? 'Activités : désactivées' : checkbox.checked ? 'Connexion prof requise' : 'Activités : désactivées' : 'Activités : ' + room.viewers + (room.viewers === 1 ? ' page connectée' : ' pages connectées');
+    connections.hidden = !counted;
+    if (counted) {
+      connections.textContent = room.viewers + (room.viewers === 1 ? ' connexion' : ' connexions');
+      connections.setAttribute('aria-label', status.textContent);
+    } else showConnections(false);
+    activityStats = counted && Array.isArray(room.activities) ? room.activities.filter(item => item && typeof item.id === 'string' && item.id.length <= 40 && Number.isInteger(item.count) && item.count > 0).slice(0, 100) : [];
+    if (!byId('activitySummary')?.hidden) renderConnections();
   }
-  function needConnection() {
-    clearTimers();
-    requestController?.abort();
-    releases.splice(0);
-    session = null;
-    setStatus(checkbox.checked ? 'Connexion prof requise' : 'Activités : désactivées');
+  function setFollowing(value) {
+    display.setFollowing(value);
+    tools?.setFollowing(value);
+    document.body.classList.toggle('remote-following', value);
+    for (const id of ['threshold', 'quickThreshold', 'delay', 'mode', 'pulse', 'test']) if (byId(id)) byId(id).disabled = value;
+    if (value) byId('calibrate').disabled = true;
+    else byId('calibrate').disabled = !display.getMicrophoneState();
   }
-  function newId() {
-    if (crypto.randomUUID) return crypto.randomUUID();
-    const bytes = crypto.getRandomValues(new Uint8Array(16));
-    bytes[6] = (bytes[6] & 15) | 64;
-    bytes[8] = (bytes[8] & 63) | 128;
-    const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
-    return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+  function requestControl() {
+    setError('Clique sur « Prendre la main ».');
+    control.focus();
   }
-  function begin() {
-    clearTimers();
-    if (!auth?.getGrant()) { needConnection(); return; }
-    session = { id: newId(), claimed: false, dirty: true, conflict: false, retryDelay: 1000 };
-    setStatus('Activités : connexion…');
-    void pump();
-  }
-  function queueState() {
-    if (checkbox.checked && !auth?.getGrant()) { needConnection(); return; }
-    if (!session || session.conflict || hidden) return;
-    session.dirty = true;
-    if (!retryTimer) void pump();
-  }
-  function retry(current) {
-    if (session !== current || current.conflict || hidden || !checkbox.checked) return;
-    if (!auth?.getGrant()) { needConnection(); return; }
-    current.dirty = true;
-    setStatus('Activités : hors ligne');
-    retryTimer = setTimeout(() => {
-      retryTimer = null;
-      void pump();
-    }, current.retryDelay);
-    current.retryDelay = Math.min(15000, current.retryDelay * 2);
-  }
-  async function pump() {
-    if (inFlight || hidden || retryTimer) return;
-    const release = releases.shift();
-    const current = session;
-    if (!release && (!current || current.conflict || !current.dirty || !checkbox.checked)) return;
-    const grant = release ? release.grant : auth?.getGrant();
-    const channel = release ? release.channel : auth?.getChannel();
-    if (!grant) { if (!release) needConnection(); return; }
-    inFlight = true;
-    if (!release) {
-      clearTimeout(heartbeatTimer);
-      heartbeatTimer = null;
-      current.dirty = false;
-    }
-    const body = release ? release.body : {
-      action: current.claimed ? 'heartbeat' : 'claim',
-      sessionId: current.id,
-      ...readState()
-    };
-    const controller = new AbortController();
-    requestController = controller;
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    try {
-      const response = await fetch(endpoint('/publish', channel), {
-        method: 'POST', credentials: 'omit', cache: 'no-store',
-        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + grant },
-        body: JSON.stringify(body), signal: controller.signal
-      });
-      if (response.status === 401) {
-        if (!release && session === current) { auth.clearGrant(); needConnection(); }
-        return;
-      }
-      if (release || session !== current || hidden || !checkbox.checked) return;
-      if (response.status === 409 || response.status === 410) {
-        current.conflict = true;
-        current.dirty = false;
-        clearTimers();
-        setStatus(response.status === 409 ? 'Autre page Classe calme active' : 'Activités : hors ligne');
-        return;
-      }
-      if (!response.ok) throw new Error('relay');
-      const result = await response.json();
-      if (session !== current || hidden || !checkbox.checked) return;
-      if (typeof result.active !== 'boolean') throw new Error('relay');
-      current.claimed = true;
-      current.retryDelay = 1000;
-      setStatus(result.active ? 'Activités : reliées' : 'Activités : hors ligne', result.viewers, result.activities);
-      heartbeatTimer = setTimeout(() => {
-        heartbeatTimer = null;
-        queueState();
-      }, 10000);
-    } catch {
-      if (!release) retry(current);
-    } finally {
-      clearTimeout(timeout);
-      if (requestController === controller) requestController = null;
-      inFlight = false;
-      if (releases.length || (session?.dirty && !retryTimer)) void pump();
-    }
-  }
-  function queueRelease(current) {
-    const grant = auth?.getGrant();
-    if (current && !current.conflict && grant) releases.push({
-      body: { action: 'release', sessionId: current.id, ...readState(), alarm: false },
-      grant, channel: auth.getChannel()
+  document.addEventListener('classe-calme:request-control', requestControl);
+
+  function command(action, values = {}) {
+    if (!isReady()) return Promise.reject(new Error('offline'));
+    const requestId = crypto.randomUUID();
+    const current = socket;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { pending.delete(requestId); reject(new Error('timeout')); }, 10000);
+      pending.set(requestId, { resolve, reject, timer, socket: current });
+      try { current.send(JSON.stringify({ type: 'command', requestId, action, ...values })); }
+      catch (error) { clearTimeout(timer); pending.delete(requestId); reject(error); }
     });
   }
-  function disable() {
-    clearTimers();
-    queueRelease(session);
-    session = null;
-    setStatus('Activités : désactivées');
-    void pump();
+  function rejectPending() {
+    for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error('offline')); }
+    pending.clear();
+    for (const waiter of roomWaiters) { clearTimeout(waiter.timer); waiter.reject(new Error('offline')); }
+    roomWaiters.clear();
   }
+  function waitForRoom(predicate) {
+    if (predicate()) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const waiter = { predicate, resolve, reject, timer: null };
+      waiter.timer = setTimeout(() => { roomWaiters.delete(waiter); reject(new Error('timeout')); }, 4000);
+      roomWaiters.add(waiter);
+    });
+  }
+  async function authorizedFetch(path, options = {}, extra = {}, bodyType = 'json') {
+    const grant = auth.getGrant();
+    if (!grant) throw new Error('auth');
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (options.signal?.aborted) controller.abort();
+    else options.signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(abort, options.method === 'POST' ? 30000 : 60000);
+    try {
+      const response = await fetch(endpoint(path, extra), { credentials: 'omit', cache: 'no-store', ...options, signal: controller.signal, headers: { ...options.headers, Authorization: 'Bearer ' + grant } });
+      if (response.status === 401) { auth.clearGrant(); throw new Error('auth'); }
+      if (!response.ok) {
+        if (response.status === 413) throw new Error('size');
+        if (response.status === 409 || response.status === 403) throw new Error('control');
+        throw new Error('transfer');
+      }
+      return await (bodyType === 'blob' ? response.blob() : response.json());
+    } finally { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); }
+  }
+  async function uploadFile(fileId) {
+    if (knownFiles.has(fileId)) return;
+    if (uploading.has(fileId)) return uploading.get(fileId);
+    const currentGeneration = generation;
+    const signal = transferController.signal;
+    const promise = (async () => {
+      const file = display.getFile(fileId);
+      if (!file) throw new Error('file');
+      if (file.size <= 0 || file.size > maxFileSize) throw new Error('size');
+      const parts = Math.ceil(file.size / chunkSize);
+      for (let part = 0; part < parts; part++) {
+        if (!isController() || currentGeneration !== generation || signal.aborted) throw new Error('control');
+        const result = await authorizedFetch('/files', {
+          method: 'POST', headers: { 'Content-Type': 'application/octet-stream' },
+          body: file.slice(part * chunkSize, Math.min(file.size, (part + 1) * chunkSize)), signal
+        }, { id: fileId, part, parts, deviceId });
+        if (!result?.ok || (part === parts - 1 && !result.complete)) throw new Error('transfer');
+      }
+      if (generation === currentGeneration && !signal.aborted) knownFiles.add(fileId);
+    })();
+    uploading.set(fileId, promise);
+    try { await promise; }
+    finally { if (uploading.get(fileId) === promise) uploading.delete(fileId); }
+  }
+  async function loadFile(fileId) {
+    const local = display.getFile(fileId);
+    if (local) return local;
+    if (downloaded.has(fileId)) return downloaded.get(fileId);
+    const currentGeneration = generation;
+    const promise = authorizedFetch('/files', { signal: transferController.signal }, { id: fileId }, 'blob');
+    downloaded.set(fileId, promise);
+    try {
+      const blob = await promise;
+      if (generation !== currentGeneration) throw new Error('offline');
+      return blob;
+    } catch (error) { if (downloaded.get(fileId) === promise) downloaded.delete(fileId); throw error; }
+  }
+  function localTools() {
+    const value = tools?.getBroadcastState() || { message: 'MOINS DE BRUIT, MERCI.', notice: null, timer: null };
+    if (value.notice) value.notice = { ...value.notice, until: value.notice.until - clockOffset };
+    if (value.timer?.state === 'running') value.timer = { ...value.timer, until: value.timer.until - clockOffset };
+    return value;
+  }
+  function queueDisplay() {
+    if (!isController()) return;
+    controllerLocalDisplay = true;
+    displayVersion++;
+    void flushDisplay();
+  }
+  async function flushDisplay() {
+    if (displayBusy || !isController() || displaySent === displayVersion) return;
+    displayBusy = true;
+    const currentGeneration = generation;
+    try {
+      while (isController() && generation === currentGeneration && displaySent !== displayVersion) {
+        const version = displayVersion;
+        const state = display.getState();
+        const files = state.documents.filter(item => item.kind === 'pdf' && !knownFiles.has(item.fileId));
+        if (files.length) setError('Envoi du PDF…');
+        for (const item of files) await uploadFile(item.fileId);
+        if (!isController() || generation !== currentGeneration) return;
+        if (version !== displayVersion) continue;
+        await command('display', { display: state });
+        if (generation !== currentGeneration) return;
+        displaySent = version;
+        errorMessage = '';
+        renderStatus();
+      }
+    } catch (error) {
+      if (generation !== currentGeneration || !isController()) return;
+      displaySent = displayVersion;
+      setError(error.message === 'size' ? 'PDF trop volumineux : 15 Mo maximum.' : 'Envoi impossible. Réessaie en ouvrant le PDF.');
+    } finally {
+      displayBusy = false;
+      if (displaySent !== displayVersion) void flushDisplay();
+    }
+  }
+  function queueTools() {
+    if (applyingTools || !isController()) return;
+    controllerLocalTools = true;
+    toolsVersion++;
+    clearTimeout(toolTimer);
+    toolTimer = setTimeout(() => { toolTimer = null; void flushTools(); }, 100);
+  }
+  async function flushTools() {
+    if (toolsBusy || !isController() || toolsSent === toolsVersion) return;
+    toolsBusy = true;
+    const currentGeneration = generation;
+    try {
+      while (isController() && currentGeneration === generation && toolsSent !== toolsVersion) {
+        const version = toolsVersion;
+        await command('tools', { tools: localTools() });
+        if (generation !== currentGeneration) return;
+        toolsSent = version;
+      }
+    } catch {
+      if (currentGeneration === generation && isController()) { toolsSent = toolsVersion; setError('Modification non envoyée. Réessaie.'); }
+    } finally {
+      toolsBusy = false;
+      if (toolsSent !== toolsVersion) void flushTools();
+    }
+  }
+  function applyRemoteTools() {
+    if (!room || (isController() && (controllerLocalTools || toolsBusy || toolsVersion !== toolsSent))) return;
+    const signature = JSON.stringify(room.tools);
+    if (appliedTools === signature) return;
+    applyingTools = true;
+    try { tools?.applyBroadcastState(room.tools, { serverNow: room.serverNow }); appliedTools = signature; }
+    finally { applyingTools = false; }
+  }
+  async function applyRemoteDisplay() {
+    if (displayApplyBusy || !isReady()) return;
+    displayApplyBusy = true;
+    const currentGeneration = generation;
+    try {
+      while (isReady() && generation === currentGeneration) {
+        if (isController() && (controllerLocalDisplay || displayBusy || displayVersion !== displaySent)) return;
+        const state = room.display;
+        const signature = JSON.stringify(state);
+        if (signature === appliedDisplay) return;
+        await display.applyState(state, loadFile);
+        if (generation !== currentGeneration) return;
+        appliedDisplay = signature;
+      }
+    } catch {
+      if (generation === currentGeneration) setError('PDF indisponible. Vérifie la connexion.');
+    } finally {
+      displayApplyBusy = false;
+      if (generation !== currentGeneration && isReady()) void applyRemoteDisplay();
+    }
+  }
+  function applyNoise() {
+    if (!room || !isReady()) return;
+    const mine = room.microphone?.deviceId === deviceId;
+    if (!micClaimPending && !mine && micOwned && display.getMicrophoneState()) display.stopMicrophone();
+    micOwned = mine;
+    const locallyMeasuring = mine && display.getMicrophoneState();
+    const preferences = isController() && controllerLocalTools ? undefined : room.tools?.preferences;
+    display.setRemoteNoise(room.microphone || room.noise?.alarm || room.noise?.pausedUntil > room.serverNow ? room.noise : null, preferences, { sourceLocal: locallyMeasuring, serverNow: room.serverNow });
+    if (!locallyMeasuring && room.microphone) byId('badgeText').textContent = 'Micro · ' + room.microphone.label;
+  }
+  function acceptRoom(value) {
+    if (!value || value.type !== 'remote' || value.v !== 1 || !Number.isFinite(value.revision) || value.revision < highestRevision || !value.display || !value.tools || !Array.isArray(value.devices)) return;
+    const wasController = isController();
+    const firstSnapshot = !received;
+    highestRevision = value.revision;
+    room = value;
+    received = true;
+    retryDelay = 1000;
+    clockOffset = Date.now() - value.serverNow;
+    for (const item of value.display.documents || []) if (item.kind === 'pdf') knownFiles.add(item.fileId);
+    const referencedFiles = new Set([...value.display.documents, ...display.getState().documents].filter(item => item.kind === 'pdf').map(item => item.fileId));
+    for (const fileId of downloaded.keys()) if (!referencedFiles.has(fileId)) downloaded.delete(fileId);
+    const controlling = isController();
+    if (wasController && !controlling) {
+      transferController.abort();
+      transferController = new AbortController();
+      displaySent = displayVersion;
+      toolsSent = toolsVersion;
+      controllerLocalDisplay = controllerLocalTools = false;
+      errorMessage = '';
+    }
+    setFollowing(!controlling);
+    if (!controlling && (firstSnapshot || wasController)) window.updateProjection?.(true);
+    const localState = display.getState();
+    const initializeLocal = firstSnapshot && controlling && value.display.documents.length === 0;
+    initialized = true;
+    if (initializeLocal) {
+      if (localState.documents.length) queueDisplay();
+      else appliedDisplay = JSON.stringify(value.display);
+      queueTools();
+      void command('link', { enabled: checkbox.checked }).catch(() => {});
+    } else {
+      checkbox.checked = Boolean(value.linkActivities);
+      applyRemoteTools();
+      void applyRemoteDisplay();
+    }
+    applyNoise();
+    for (const waiter of roomWaiters) if (waiter.predicate()) { clearTimeout(waiter.timer); roomWaiters.delete(waiter); waiter.resolve(); }
+    if (localMicIntent && display.getMicrophoneState() && !micClaimPending && room.microphone?.deviceId !== deviceId) void claimMicrophone();
+    renderStatus();
+  }
+  function resetConnection() {
+    const hadRemoteMic = micOwned || micClaimPending || room?.microphone?.deviceId === deviceId;
+    received = false;
+    clearInterval(pingTimer); pingTimer = null;
+    clearTimeout(toolTimer); toolTimer = null;
+    clearTimeout(noiseTimer); noiseTimer = null;
+    rejectPending();
+    transferController.abort(); transferController = new AbortController();
+    uploading.clear(); downloaded.clear(); knownFiles.clear();
+    micAttempt++; micClaimPending = false; localMicIntent = false;
+    if (display.getMicrophoneState() && hadRemoteMic) display.stopMicrophone();
+    micOwned = false;
+    display.setRemoteNoise(null);
+    setFollowing(false);
+    displaySent = displayVersion;
+    toolsSent = toolsVersion;
+    appliedDisplay = appliedTools = '';
+    controllerLocalDisplay = controllerLocalTools = false;
+  }
+  function disconnect() {
+    generation++;
+    clearTimeout(reconnectTimer); reconnectTimer = null;
+    const oldSocket = socket;
+    socket = null;
+    resetConnection();
+    room = null; highestRevision = -1;
+    oldSocket?.close(1000, 'Page fermée');
+    renderStatus();
+  }
+  async function probeAuthorization(currentGeneration) {
+    try {
+      const response = await fetch(endpoint('/files', { id: crypto.randomUUID() }), { credentials: 'omit', cache: 'no-store', headers: { Authorization: 'Bearer ' + auth.getGrant() } });
+      if (currentGeneration === generation && response.status === 401) auth.clearGrant();
+    } catch {}
+  }
+  function scheduleReconnect(currentGeneration) {
+    if (hidden || !auth.getGrant() || generation !== currentGeneration || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, retryDelay);
+    retryDelay = Math.min(15000, retryDelay * 2);
+  }
+  function connect() {
+    if (hidden || !auth.getGrant()) { renderStatus(); return; }
+    if (socket && socket.readyState <= WebSocket.OPEN) return;
+    const initialLocalMic = !initialized && display.getMicrophoneState();
+    generation++;
+    const currentGeneration = generation;
+    resetConnection();
+    localMicIntent = initialLocalMic;
+    room = null; highestRevision = -1;
+    errorMessage = '';
+    const url = endpoint('/teacher', { deviceId, label: deviceLabel });
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    let current;
+    try { current = new WebSocket(url.href, ['classe-calme', auth.getGrant()]); }
+    catch { setError('Connexion impossible.'); scheduleReconnect(currentGeneration); return; }
+    socket = current;
+    renderStatus();
+    current.addEventListener('open', () => {
+      if (socket !== current || generation !== currentGeneration) { current.close(); return; }
+      pingTimer = setInterval(() => { if (current.readyState === WebSocket.OPEN) current.send(JSON.stringify({ type: 'ping' })); }, 10000);
+    });
+    current.addEventListener('message', event => {
+      if (socket !== current || generation !== currentGeneration) return;
+      let value;
+      try { value = JSON.parse(event.data); } catch { return; }
+      if (value?.type === 'ack') {
+        const request = pending.get(value.requestId);
+        if (!request || request.socket !== current) return;
+        clearTimeout(request.timer); pending.delete(value.requestId);
+        if (value.ok) request.resolve(value);
+        else request.reject(new Error(value.error || 'command'));
+      } else acceptRoom(value);
+    });
+    current.addEventListener('close', () => {
+      if (socket !== current || generation !== currentGeneration) return;
+      socket = null;
+      resetConnection();
+      setError(auth.getGrant() ? 'Écrans : hors ligne. Reconnexion…' : 'Connexion prof requise.');
+      void probeAuthorization(currentGeneration);
+      scheduleReconnect(currentGeneration);
+    });
+    current.addEventListener('error', () => { if (socket === current) setError('Écrans : connexion impossible.'); });
+  }
+  async function takeControl() {
+    if (!auth.getGrant()) { auth.connect(); return false; }
+    if (!isReady()) { setError('Connexion en cours.'); connect(); return false; }
+    if (isController()) { setError('Cet appareil pilote les écrans reliés.'); return true; }
+    if (takingControl) return false;
+    takingControl = true; renderStatus();
+    try {
+      await command('take-control');
+      await waitForRoom(() => room?.controller?.deviceId === deviceId);
+      errorMessage = '';
+      return true;
+    } catch { setError('Prise de main impossible. Réessaie.'); return false; }
+    finally { takingControl = false; renderStatus(); }
+  }
+  control.addEventListener('click', () => { void takeControl(); });
+  window.ClasseCalmeRemote = Object.freeze({ takeControl, isController, isConnected: isReady });
 
-  try {
-    const stored = localStorage.getItem(storageKey);
-    if (stored !== null) checkbox.checked = stored !== 'false';
-  } catch { /* Le lien fonctionne aussi sans stockage local. */ }
+  async function claimMicrophone() {
+    if (!isReady() || !display.getMicrophoneState() || micClaimPending) return;
+    const attempt = ++micAttempt;
+    const currentGeneration = generation;
+    localMicIntent = false;
+    micClaimPending = true;
+    try {
+      await command('microphone', { enabled: true });
+      if (generation !== currentGeneration) return;
+      if (attempt !== micAttempt || !display.getMicrophoneState()) {
+        if (!display.getMicrophoneState()) void command('microphone', { enabled: false }).catch(() => {});
+        return;
+      }
+      await waitForRoom(() => room?.microphone?.deviceId === deviceId);
+      if (generation !== currentGeneration || attempt !== micAttempt || !display.getMicrophoneState()) return;
+      micOwned = true;
+      void sendNoise();
+    } catch {
+      if (generation === currentGeneration && attempt === micAttempt) { display.stopMicrophone(); setError('Micro non relié. Réessaie.'); }
+    } finally {
+      if (generation === currentGeneration && attempt === micAttempt) { micClaimPending = false; applyNoise(); renderStatus(); }
+    }
+  }
+  document.addEventListener('classe-calme:microphone', event => {
+    const active = event.detail?.active === true;
+    if (active) { localMicIntent = true; if (isReady()) void claimMicrophone(); }
+    else {
+      micAttempt++; micClaimPending = false; localMicIntent = false;
+      if (isReady()) void command('microphone', { enabled: false }).catch(() => {});
+    }
+    renderStatus();
+  });
+  async function sendNoise() {
+    clearTimeout(noiseTimer); noiseTimer = null;
+    if (!isReady() || room?.microphone?.deviceId !== deviceId || !display.getMicrophoneState()) return;
+    const delay = 250 - (performance.now() - lastNoiseSent);
+    if (delay > 0) { noiseTimer = setTimeout(() => { noiseTimer = null; void sendNoise(); }, delay); return; }
+    lastNoiseSent = performance.now();
+    try { await command('noise', { noise: latestNoise }); }
+    catch {}
+  }
+  document.addEventListener('classe-calme:noise', event => {
+    if (!Number.isFinite(event.detail?.level)) return;
+    latestNoise = { level: Math.max(0, Math.min(100, event.detail.level)), alarm: event.detail.alarm === true };
+    void sendNoise();
+  });
+  document.addEventListener('classe-calme:display', queueDisplay);
+  document.addEventListener('classe-calme:state', queueTools);
+  document.addEventListener('classe-calme:threshold', queueTools);
+  for (const id of ['delay', 'mode', 'pulse']) byId(id)?.addEventListener('change', queueTools);
+  byId('test')?.addEventListener('click', event => {
+    if (!isController()) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    void command('test-alert', { durationMs: 5000 }).catch(() => setError('Alerte non envoyée.'));
+  }, true);
+  for (const id of ['dismiss', 'pause']) byId(id)?.addEventListener('click', event => {
+    if (!isController()) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    const durationMs = id === 'pause' && room.noise?.pausedUntil > Date.now() - clockOffset ? 0 : 30000;
+    void command('pause-alert', { durationMs }).catch(() => {});
+  }, true);
+  try { const stored = localStorage.getItem(storageKey); if (stored !== null) checkbox.checked = stored !== 'false'; } catch {}
   checkbox.addEventListener('change', () => {
     try { localStorage.setItem(storageKey, String(checkbox.checked)); } catch {}
-    if (checkbox.checked) begin(); else disable();
+    if (isController()) void command('link', { enabled: checkbox.checked }).catch(() => setError('Modification non envoyée.'));
   });
-  connectButton.addEventListener('click', () => {
-    if (!auth?.connect()) setStatus('Connexion indisponible dans ce navigateur');
-  });
+  connectButton.addEventListener('click', () => { auth.connect(); });
   document.addEventListener('classe-calme:auth-changed', () => {
-    if (auth?.getGrant()) {
-      if (checkbox.checked) begin(); else setStatus('Activités : désactivées');
-    } else needConnection();
+    if (auth.getGrant()) connect();
+    else { errorMessage = ''; disconnect(); }
   });
-  document.addEventListener('classe-calme:state', queueState);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && session && !session.conflict) queueState();
+    if (document.visibilityState !== 'visible' || hidden) return;
+    if (!socket || socket.readyState > WebSocket.OPEN) connect();
+    else if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ping' }));
   });
-  window.addEventListener('pagehide', () => {
-    hidden = true;
-    clearTimers();
-    requestController?.abort();
-    queueRelease(session);
-    session = null;
-    for (const release of releases.splice(0)) {
-      const json = JSON.stringify({ action: 'release', sessionId: release.body.sessionId, grant: release.grant });
-      const url = endpoint('/release', release.channel);
-      let sent = false;
-      try { sent = navigator.sendBeacon?.(url, new Blob([json], { type: 'text/plain' })); } catch {}
-      if (!sent) fetch(url, {
-        method: 'POST', credentials: 'omit', keepalive: true,
-        headers: { 'Content-Type': 'text/plain' }, body: json
-      }).catch(() => {});
-    }
-  });
-  window.addEventListener('pageshow', event => {
-    if (!event.persisted) return;
-    hidden = false;
-    if (checkbox.checked) begin(); else setStatus('Activités : désactivées');
-  });
-  if (checkbox.checked) begin(); else setStatus('Activités : désactivées');
-
-  // Le mot de passe reste facultatif pour projeter des documents.
-  if (checkbox.checked && auth?.canAutoConnect() && !document.querySelector('#panels .panel')) {
-    if (!auth.connect()) setStatus('Connecter les activités');
-  }
+  window.addEventListener('pagehide', () => { hidden = true; disconnect(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) { hidden = false; connect(); } });
+  renderStatus();
+  if (auth.getGrant()) connect();
+  else if (auth.canAutoConnect() && !byId('panels')?.querySelector('.panel')) auth.connect();
 })();

@@ -8,9 +8,22 @@ Page web de projection : plusieurs PDF et pages web, jauge de bruit réglable, a
 
 Cette seconde adresse propose la projection, les onglets, le micro et les alertes locales. Elle ne charge ni connexion professeur, ni relais, ni liaison aux activités. Aucun compte n’est nécessaire. Les mêmes fichiers d’affichage et de mesure sonore sont partagés entre les deux versions.
 
-Les PDF et le son sont traités dans le navigateur. Le micro demande son autorisation habituelle. Aucun son ni PDF n’est envoyé au relais.
+Le son reste dans le navigateur : aucun enregistrement ni son envoyé. Le micro demande son autorisation habituelle. Dans la version personnelle connectée, les PDF sont transmis au relais privé pour les afficher sur les autres appareils autorisés. La version à partager conserve les PDF uniquement sur le poste.
 
 Le bouton **Outils** ouvre le minuteur, les profils Silence / Binômes / Groupes, les consignes temporaires et le texte personnalisable de l’alerte. Les seuils restent dans cet ordre, du plus bas au plus haut, y compris après un réglage manuel. Les seuils et le texte sont mémorisés dans le navigateur. La poignée permet de déplacer la barre ; **−** la réduit à la jauge et aux indicateurs utiles. Ces outils sont présents dans les deux versions.
+
+## Mac et vidéoprojecteur
+
+1. Ouvrir la version personnelle sur chaque appareil et saisir le même mot de passe professeur.
+2. Le premier appareil pilote. Les autres affichent le même document en vue projection.
+3. **Prendre la main** permet de changer le document depuis un autre appareil.
+4. **Activer micro** choisit le micro de cet appareil. Le dernier micro activé remplace le précédent, indépendamment de la télécommande.
+
+Les onglets PDF et web, la page et le zoom du PDF, le minuteur, les consignes et les alertes suivent le pilote. Les réglages restent accessibles dans la barre. Le véritable plein écran nécessite un clic sur **Projeter** sur chaque appareil, selon les règles du navigateur.
+
+Un site intégré reste utilisable directement sur le PC. Les clics et défilements à l’intérieur d’un site ne sont pas reproduits sur les autres écrans. Certains sites refusent l’affichage intégré : **Ouvrir à part** permet de les ouvrir dans un autre onglet, hors de la projection synchronisée.
+
+Les documents privés sont réservés aux appareils connectés avec le mot de passe. Les pages élèves ne les reçoivent pas. Les PDF partagés sont limités à 15 Mio par fichier, avec un stockage temporaire de 60 Mio par salle. Sans connexion professeur, la projection locale reste utilisable.
 
 ## Activités des élèves
 
@@ -18,7 +31,7 @@ Les pages du [labo techno](https://jean-marie-cardoso.github.io/labo-techno/) re
 
 L’adresse et le code sont publics. Le mot de passe et la vérification des droits restent côté serveur : ouvrir le lien ne permet pas de commander les activités. Les élèves n’ont aucun mot de passe à saisir.
 
-Les liens d’activité habituels ne changent pas. La liaison est commune à toutes les activités : une activité ouverte hors de la salle peut aussi recevoir l’alerte. Quand le professeur ferme la page, l’alerte est libérée ; sans réseau, elle expire au plus tard après 35 secondes.
+Les liens d’activité habituels ne changent pas. La liaison est commune à toutes les activités : une activité ouverte hors de la salle peut aussi recevoir l’alerte. Quand le dernier appareil professeur se déconnecte, la liaison s’arrête ; sans réseau, elle expire au plus tard après 35 secondes. Un appareil suiveur reste relié aux activités même quand le pilote est fermé.
 
 Dans la version personnelle, le minuteur, les consignes et le texte de l’alerte sont aussi envoyés aux activités. Le minuteur apparaît dans un coin et suit les pauses, reprises et remises à zéro du professeur. Cliquer sur le nombre de connexions affiche leur répartition par activité. Il s’agit de pages ouvertes, pas de personnes : plusieurs onglets peuvent compter plusieurs fois. Ce détail reste réservé au professeur. La version à partager affiche les outils uniquement sur la projection.
 
@@ -30,3 +43,5 @@ Dans la version personnelle, le minuteur, les consignes et le texte de l’alert
 Aucun secret n’est présent dans ce dépôt. Les valeurs privées restent dans la configuration des serveurs. GitHub Pages héberge uniquement l’interface ; le relais reste nécessaire pour joindre des PC différents.
 
 Le relais utilise deux secrets Cloudflare : `TEACHER_PASSWORD_HASH` (empreinte PBKDF2-SHA-256 salée, format `pbkdf2-sha256:100000:<sel hex32>:<empreinte hex64>`) et `TEACHER_AUTH_SECRET` (clé aléatoire de signature d’au moins 32 caractères). Le mot de passe n’est pas enregistré dans le navigateur. Les tentatives de connexion sont limitées et les sessions sont révocables côté serveur. Pour révoquer toutes les autorisations lors d’un changement de mot de passe, renouveler aussi la clé de signature.
+
+La synchronisation des appareils utilise une connexion professeur distincte des pages élèves. Le pilote de l’affichage et la source du micro ont chacun leur propre droit temporaire. Le transfert des PDF est authentifié et fractionné ; les fichiers ne sont jamais publiés dans GitHub ni transmis par les connexions élèves.

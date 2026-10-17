@@ -68,7 +68,7 @@
     if (!dockButton) return;
     const connected = Boolean(grant && claims?.exp > Date.now() / 1000);
     dockButton.textContent = connected ? 'Déconnexion' : 'Connexion prof';
-    dockButton.title = connected ? 'Déconnecter les activités' : 'Relier mes activités';
+    dockButton.title = connected ? 'Déconnecter cet appareil' : 'Relier mes appareils et mes activités';
     dockButton.classList.toggle('prof-connected', connected);
     dockButton.setAttribute('aria-label', connected ? 'Déconnexion professeur' : 'Connexion professeur');
   }
