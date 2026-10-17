@@ -2,6 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 const TTL = 35000;
 const MESSAGE = 'MOINS DE BRUIT, MERCI.';
 const NOTICE_MAX_LIFETIME = 180000;
+const TIMER_MAX_LIFETIME = 180 * 60000;
 const HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 const json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: HEADERS });
 
@@ -122,7 +123,12 @@ export class ClassroomRelay extends DurableObject {
       text: state.notice.text,
       remainingMs: Math.min(remainingMs, state.notice.until - now)
     } : null;
-    return { type: 'state', v: 1, active, alarm: Boolean(active && state.alarm), mode: state?.mode || 'cover', pulse: state?.pulse ?? false, message: state?.message || MESSAGE, notice, remainingMs };
+    let timer = active ? state.timer || null : null;
+    if (timer?.state === 'running') {
+      const timerRemaining = Math.max(0, Math.min(TIMER_MAX_LIFETIME, timer.until - now));
+      timer = { state: timerRemaining > 0 ? 'running' : 'finished', remainingMs: timerRemaining };
+    }
+    return { type: 'state', v: 1, active, alarm: Boolean(active && state.alarm), mode: state?.mode || 'cover', pulse: state?.pulse ?? false, message: state?.message || MESSAGE, notice, timer, remainingMs };
   }
   teacherStats(active) {
     const sockets = this.ctx.getWebSockets();
@@ -179,10 +185,22 @@ export class ClassroomRelay extends DurableObject {
         notice = body.notice.until > now ? { text: body.notice.text.trim(), until: body.notice.until } : null;
       }
     }
+    let timer = null;
+    if (body.timer !== undefined && body.timer !== null) {
+      const input = body.timer;
+      if (typeof input !== 'object' || !['running', 'paused', 'finished'].includes(input.state)) return json({ error: 'invalid_timer' }, 400);
+      if (input.state === 'running') {
+        if (!Number.isSafeInteger(input.until) || input.until < 0 || input.until > now + TIMER_MAX_LIFETIME + 60000) return json({ error: 'invalid_timer' }, 400);
+        timer = input.until > now ? { state: 'running', until: input.until } : { state: 'finished', remainingMs: 0 };
+      } else {
+        if (!Number.isSafeInteger(input.remainingMs) || input.remainingMs < 0 || input.remainingMs > TIMER_MAX_LIFETIME || (input.state === 'finished' && input.remainingMs !== 0)) return json({ error: 'invalid_timer' }, 400);
+        timer = { state: input.state, remainingMs: input.remainingMs };
+      }
+    }
     if (body.action === 'claim' && current?.expiresAt > now && current.sessionId !== body.sessionId) {
       this.ctx.storage.sql.exec('INSERT INTO closed(sessionId,expiresAt) VALUES(?,?) ON CONFLICT(sessionId) DO UPDATE SET expiresAt=excluded.expiresAt', current.sessionId, now + 120000);
     }
-    const state = { sessionId: body.sessionId, expiresAt: now + TTL, alarm: body.alarm, mode: body.mode, pulse: body.pulse, message, notice };
+    const state = { sessionId: body.sessionId, expiresAt: now + TTL, alarm: body.alarm, mode: body.mode, pulse: body.pulse, message, notice, timer };
     this.ctx.storage.sql.exec('INSERT INTO state(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', JSON.stringify(state));
     await this.ctx.storage.setAlarm(state.expiresAt);
     this.broadcast(state);

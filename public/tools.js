@@ -9,6 +9,7 @@
   const defaultMessage = 'MOINS DE BRUIT, MERCI.';
   const defaults = { silence: 40, binomes: 55, groupes: 70 };
   const bounded = (value, min, max) => Math.min(max, Math.max(min, Math.round(value)));
+  const profileNames = Object.keys(defaults);
   const shortText = (value, limit) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
   let selectedProfile = 'binomes';
   const thresholds = { ...defaults };
@@ -32,6 +33,13 @@
     const existing = Number(document.getElementById('threshold')?.value);
     if (Number.isFinite(existing)) thresholds[selectedProfile] = bounded(existing, 10, 95);
   }
+  function orderThresholds() {
+    const index = profileNames.indexOf(selectedProfile);
+    for (let i = 0; i < profileNames.length; i++) thresholds[profileNames[i]] = bounded(thresholds[profileNames[i]], 10 + i, 93 + i);
+    for (let i = index - 1; i >= 0; i--) thresholds[profileNames[i]] = Math.min(thresholds[profileNames[i]], thresholds[profileNames[i + 1]] - 1);
+    for (let i = index + 1; i < profileNames.length; i++) thresholds[profileNames[i]] = Math.max(thresholds[profileNames[i]], thresholds[profileNames[i - 1]] + 1);
+  }
+  orderThresholds();
 
   const panel = document.createElement('aside');
   panel.id = 'toolsPopup';
@@ -158,6 +166,9 @@
     for (const profileButton of panel.querySelectorAll('[data-noise-profile]')) {
       profileButton.setAttribute('aria-pressed', String(profileButton.dataset.noiseProfile === selectedProfile));
     }
+    const index = profileNames.indexOf(selectedProfile);
+    byId('profileThreshold').min = 10 + index;
+    byId('profileThreshold').max = 93 + index;
     byId('profileThreshold').value = thresholds[selectedProfile];
     byId('profileThresholdValue').textContent = thresholds[selectedProfile];
   }
@@ -181,6 +192,11 @@
     const value = Number(byId('threshold')?.value);
     if (!Number.isFinite(value)) return;
     thresholds[selectedProfile] = bounded(value, 10, 95);
+    orderThresholds();
+    if (value !== thresholds[selectedProfile]) {
+      window.setThreshold?.(thresholds[selectedProfile]);
+      return;
+    }
     renderProfile();
     save();
   });
@@ -242,6 +258,7 @@
       timerState = 'finished';
       remainingMs = 0;
       timerAnnouncement.textContent = 'Minuteur terminé.';
+      broadcastChanged();
     }
     const time = formatTime(left);
     const label = timerState === 'finished' ? 'Temps écoulé' : (timerState === 'paused' ? '⏸ ' : '◷ ') + time;
@@ -273,6 +290,7 @@
       timerAnnouncement.textContent = '';
     }
     renderTimer();
+    broadcastChanged();
   });
   byId('timerReset').addEventListener('click', () => {
     timerState = 'idle';
@@ -281,19 +299,25 @@
     remainingMs = minutes * 60000;
     timerAnnouncement.textContent = '';
     renderTimer();
+    broadcastChanged();
   });
   byId('timerMinutes').addEventListener('input', () => {
     if (timerState === 'idle' || timerState === 'finished') {
+      const wasFinished = timerState === 'finished';
       timerState = 'idle';
       remainingMs = bounded(Number(byId('timerMinutes').value) || 5, 1, 180) * 60000;
       renderTimer();
+      if (wasFinished) broadcastChanged();
     }
   });
 
   window.ClasseCalmeTools = {
     getBroadcastState: () => ({
       message,
-      notice: currentNotice && currentNotice.until > Date.now() ? { ...currentNotice } : null
+      notice: currentNotice && currentNotice.until > Date.now() ? { ...currentNotice } : null,
+      timer: timerState === 'running' ? { state: 'running', until: deadline } :
+        timerState === 'paused' ? { state: 'paused', remainingMs } :
+        timerState === 'finished' ? { state: 'finished', remainingMs: 0 } : null
     }),
     openPanel,
     closePanel
