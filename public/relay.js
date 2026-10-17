@@ -99,8 +99,10 @@
   }
   function needConnection() {
     clearTimers();
+    requestController?.abort();
+    releases.splice(0);
     session = null;
-    setStatus(checkbox.checked ? 'Connecter les activités' : 'Activités : désactivées');
+    setStatus(checkbox.checked ? 'Connexion prof requise' : 'Activités : désactivées');
   }
   function newId() {
     if (crypto.randomUUID) return crypto.randomUUID();
@@ -220,6 +222,11 @@
   connectButton.addEventListener('click', () => {
     if (!auth?.connect()) setStatus('Connexion indisponible dans ce navigateur');
   });
+  document.addEventListener('classe-calme:auth-changed', () => {
+    if (auth?.getGrant()) {
+      if (checkbox.checked) begin(); else setStatus('Activités : désactivées');
+    } else needConnection();
+  });
   document.addEventListener('classe-calme:state', queueState);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && session && !session.conflict) queueState();
@@ -248,7 +255,7 @@
   });
   if (checkbox.checked) begin(); else setStatus('Activités : désactivées');
 
-  // Une seule tentative automatique, avant l'ouverture des documents.
+  // Le mot de passe reste facultatif pour projeter des documents.
   if (checkbox.checked && auth?.canAutoConnect() && !document.querySelector('#panels .panel')) {
     if (!auth.connect()) setStatus('Connecter les activités');
   }

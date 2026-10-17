@@ -14,7 +14,9 @@ Le bouton **Outils** ouvre le minuteur, les profils Silence / Binômes / Groupes
 
 ## Activités des élèves
 
-Les pages du [labo techno](https://jean-marie-cardoso.github.io/labo-techno/) reçoivent automatiquement les alertes. Pour autoriser l’envoi, la page professeur utilise la connexion privée existante de Classe calme, puis revient sur GitHub. L’autorisation dure au maximum huit heures dans cet onglet. Le bouton « Connecter » des réglages permet de la renouveler. La projection et le micro fonctionnent aussi sans liaison.
+Les pages du [labo techno](https://jean-marie-cardoso.github.io/labo-techno/) reçoivent automatiquement les alertes. Le bouton **Connexion prof** demande le mot de passe du professeur pour autoriser l’envoi. Aucun compte OpenAI n’est nécessaire. L’autorisation dure au maximum huit heures dans cet onglet ; **Déconnexion** la révoque. La projection et le micro fonctionnent aussi sans connexion.
+
+L’adresse et le code sont publics. Le mot de passe et la vérification des droits restent côté serveur : ouvrir le lien ne permet pas de commander les activités. Les élèves n’ont aucun mot de passe à saisir.
 
 Les liens d’activité habituels ne changent pas. La liaison est commune à toutes les activités : une activité ouverte hors de la salle peut aussi recevoir l’alerte. Quand le professeur ferme la page, l’alerte est libérée ; sans réseau, elle expire au plus tard après 35 secondes.
 
@@ -24,6 +26,7 @@ Dans la version personnelle, le minuteur, les consignes et le texte de l’alert
 
 - `public/` : page GitHub Pages, publiée automatiquement depuis `main`.
 - `server/relay/` : relais Cloudflare existant. Les droits d’envoi sont vérifiés par le serveur ; les pages élèves restent en lecture seule.
-- `server/private-bridge.js` : source de la passerelle privée existante qui autorise le professeur. Ce fichier est un modèle compilé par le projet Sites ; il n’est pas exécuté par GitHub Pages.
 
 Aucun secret n’est présent dans ce dépôt. Les valeurs privées restent dans la configuration des serveurs. GitHub Pages héberge uniquement l’interface ; le relais reste nécessaire pour joindre des PC différents.
+
+Le relais utilise deux secrets Cloudflare : `TEACHER_PASSWORD_HASH` (empreinte PBKDF2-SHA-256 salée, format `pbkdf2-sha256:100000:<sel hex32>:<empreinte hex64>`) et `TEACHER_AUTH_SECRET` (clé aléatoire de signature d’au moins 32 caractères). Le mot de passe n’est pas enregistré dans le navigateur. Les tentatives de connexion sont limitées et les sessions sont révocables côté serveur. Pour révoquer toutes les autorisations lors d’un changement de mot de passe, renouveler aussi la clé de signature.
