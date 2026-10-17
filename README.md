@@ -4,6 +4,10 @@ Page web de projection : plusieurs PDF et pages web, jauge de bruit réglable, a
 
 **Ouvrir : https://jean-marie-cardoso.github.io/classe-calme/**
 
+**Version à partager aux collègues : https://jean-marie-cardoso.github.io/classe-calme/partage/**
+
+Cette seconde adresse propose la projection, les onglets, le micro et les alertes locales. Elle ne charge ni connexion professeur, ni relais, ni liaison aux activités. Aucun compte n’est nécessaire. Les mêmes fichiers d’affichage et de mesure sonore sont partagés entre les deux versions.
+
 Les PDF et le son sont traités dans le navigateur. Le micro demande son autorisation habituelle. Aucun son ni PDF n’est envoyé au relais.
 
 ## Activités des élèves
