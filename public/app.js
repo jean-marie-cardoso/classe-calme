@@ -276,7 +276,7 @@ async function stop() {
   level = 0;
   showAlarm(false);
   document.body.classList.remove('listening');
-  $('mic').textContent = 'Micro';
+  $('mic').textContent = 'Activer micro';
   $('mic').setAttribute('aria-pressed', 'false');
   $('status').textContent = $('badgeText').textContent = 'Micro arrêté';
   $('level').style.width = '0%';
