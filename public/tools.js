@@ -63,10 +63,10 @@
       </form>
     </section>
     <section class="tool-section" aria-labelledby="noticeHeading">
-      <h3 id="noticeHeading">Consigne</h3>
+      <h3 id="noticeHeading">Consignes</h3>
       <div class="notice-presets" role="group" aria-label="Consignes rapides">
         <button type="button" data-class-notice="Écoutez">Écoutez</button>
-        <button type="button" data-class-notice="Travail sur papier">Travail sur papier</button>
+        <button type="button" data-class-notice="Il reste 5 minutes">Il reste 5 minutes</button>
         <button type="button" data-class-notice="Il reste 2 minutes">Il reste 2 minutes</button>
       </div>
       <form id="classNoticeForm">
