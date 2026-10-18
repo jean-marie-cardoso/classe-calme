@@ -31,7 +31,7 @@ export const CORRECTIONS = Object.freeze({
   "5/01": Object.freeze({"file":"/5/01.pdf","title":"5e · S01 · Recharger un téléphone dans un lieu public","sha256":"99efd45ef23e0ccf25065ddd8c946c21790723a1a47b71621f12f046c3d31f27","size":192805}),
   "5/02": Object.freeze({"file":"/5/02.pdf","title":"5e · S02 · Choisir une lampe de lecture","sha256":"532d9a734263a383335fcac5a8156b59e4c591a6bb67b38abecc9d0e18557e94","size":150886}),
   "5/04": Object.freeze({"file":"/5/04.pdf","title":"5e · S04 · La gourde change de forme","sha256":"c742b4172860bbd89cb2222942573cdb8b421d45b6315716174e4bead3230317","size":52687}),
-  "5/05": Object.freeze({"file":"/5/05.pdf","title":"5e · S05 · Une gourde pour tous","sha256":"0a20f14b90efbd86d104064268c6715d57b3fee9ea33b785cbce5f5c91c13815","size":150309}),
+  "5/05": Object.freeze({"file":"/5/05.pdf","title":"5e · S05 · Une gourde pour tous","sha256":"c4ce343a9c6fca149888fa9ff4538a99689dc57c94b658a0a67b0aac11090ddb","size":49506}),
   "5/07": Object.freeze({"file":"/5/07.pdf","title":"5e · S07 · La lampe à manivelle","sha256":"59e0d2a93e6941660ca7a26932152657d18101874499f7bac1f9b43fe928e722","size":46571}),
   "5/08": Object.freeze({"file":"/5/08.pdf","title":"5e · S08 · Le vélo transmet le mouvement","sha256":"cabd9708397782c9aff5f413f93fe3f4c2cb548ec6ee5fc17cb4fd55a4bd4d4a","size":207301}),
   "5/10": Object.freeze({"file":"/5/10.pdf","title":"5e · S10 · Le dossier numérique du club","sha256":"21759cce1914dac7a8f9a504f1fe42e6c70d72723d793272769928cfd47eb9ed","size":192220}),
