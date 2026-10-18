@@ -7,8 +7,8 @@
 
   const storageKey = 'classe-calme.tools.v1';
   const defaultMessage = 'MOINS DE BRUIT, MERCI.';
-  const profileDefaultsVersion = 2;
-  const defaults = { silence: 12, binomes: 30, groupes: 50 };
+  const profileDefaultsVersion = 3;
+  const defaults = { silence: 12, binomes: 25, groupes: 50 };
   const bounded = (value, min, max) => Math.min(max, Math.max(min, Math.round(value)));
   const profileNames = Object.keys(defaults);
   const shortText = (value, limit) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
@@ -20,10 +20,16 @@
     const saved = JSON.parse(localStorage.getItem(storageKey));
     if (saved && typeof saved === 'object') {
       if (Object.hasOwn(defaults, saved.profile)) selectedProfile = saved.profile;
-      if (saved.profileDefaultsVersion === profileDefaultsVersion) {
+      const updateBinomes = saved.profileDefaultsVersion === 2;
+      if (saved.profileDefaultsVersion === profileDefaultsVersion || updateBinomes) {
         for (const name of Object.keys(defaults)) {
           if (Number.isFinite(saved.thresholds?.[name])) thresholds[name] = bounded(saved.thresholds[name], 10, 95);
         }
+      }
+      if (updateBinomes) {
+        thresholds.binomes = defaults.binomes;
+        thresholds.silence = Math.min(thresholds.silence, defaults.binomes - 1);
+        thresholds.groupes = Math.max(thresholds.groupes, defaults.binomes + 1);
       }
       if (typeof saved.message === 'string') message = shortText(saved.message, 120) || defaultMessage;
       if ([15, 30, 60, 120].includes(saved.duration)) duration = saved.duration;
@@ -50,8 +56,8 @@
         <button type="button" data-noise-profile="binomes" aria-pressed="false">Binômes</button>
         <button type="button" data-noise-profile="groupes" aria-pressed="false">Groupes</button>
       </div>
-      <label class="tools-range-label" for="profileThreshold">Seuil <output id="profileThresholdValue">30</output></label>
-      <input id="profileThreshold" type="range" min="10" max="95" value="30">
+      <label class="tools-range-label" for="profileThreshold">Seuil <output id="profileThresholdValue">25</output></label>
+      <input id="profileThreshold" type="range" min="10" max="95" value="25">
     </section>
     <section class="tool-section" aria-labelledby="timerHeading">
       <h3 id="timerHeading">Minuteur</h3>
