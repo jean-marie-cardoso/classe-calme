@@ -14,7 +14,7 @@ export const CORRECTIONS = Object.freeze({
   "3/17": Object.freeze({"file":"/3/17.pdf","title":"3e · S17 · Des preuves avant de conclure","sha256":"2149298e0e01b560b8e45c099d62ff50cad6b95cf61e5da13cccd5f7a01c2f6c","size":90917}),
   "4/01": Object.freeze({"file":"/4/01.pdf","title":"4e · S01 · Un élévateur accessible","sha256":"90ea23bf631ffc9daef16076c4005566f38a8831c8d6462a7f277d6030986c4e","size":159409}),
   "4/02": Object.freeze({"file":"/4/02.pdf","title":"4e · S02 · Dessiner et choisir une solution","sha256":"4d2cea3fc3cd5e7dd011c64e47f6c77b0ef2818fb3ee98ce80aaf6e9c28400c1","size":278964}),
-  "4/04": Object.freeze({"file":"/4/04.pdf","title":"4e · S04 · La lampe change avec les usages","sha256":"4c29acfc4c7f3cdda3b15f131cb9c06f9d9ab2f2cc194e7f14e1f34b0115715a","size":41543}),
+  "4/04": Object.freeze({"file":"/4/04.pdf","title":"4e · S04 · La lampe change avec les usages","sha256":"63492c852f9a0a409b95570f6e6b5b3e91adbfad4d1ba2fee99ac6a67775171b","size":43517}),
   "4/05": Object.freeze({"file":"/4/05.pdf","title":"4e · S05 · Choisir une lampe qui dure","sha256":"50945027d0dce0f1bd80545b7426a826677b89a595360a8f746f7803b7ab66f3","size":50598}),
   "4/07": Object.freeze({"file":"/4/07.pdf","title":"4e · S07 · Le ventilateur et sa chaîne d’énergie","sha256":"5ee5a0fcf92593f60d874d347b43715c6af34867605c75c609b8592c75a47e28","size":195350}),
   "4/08": Object.freeze({"file":"/4/08.pdf","title":"4e · S08 · Une pièce cassée peut se remplacer","sha256":"562d17499b9d7b0fa682dca7c85175c23f2798dd5aaebe70efcd99c9721037f5","size":197587}),
