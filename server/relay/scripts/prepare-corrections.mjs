@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeActivities } from './write-activities.mjs';
 
 const relayDirectory = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const assetsDirectory = path.join(relayDirectory, 'correction-assets');
@@ -167,6 +168,7 @@ async function main() {
       + `export const CORRECTIONS = Object.freeze({\n${lines.join('\n')}\n});\n`;
     await writeFile(temporaryCatalogPath, catalog, 'utf8');
     await rename(temporaryCatalogPath, catalogPath);
+    await writeActivities(entries.map(entry => ({ id: entry.route, title: entry.metadata.title })));
   } finally {
     await rm(stagingDirectory, { recursive: true, force: true });
     await rm(temporaryCatalogPath, { force: true });

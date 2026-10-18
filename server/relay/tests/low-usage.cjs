@@ -20,7 +20,7 @@ function fixture() {
   class Clock extends Date { static now() { return clock; } }
   const { ClassroomRelay, defaultRoom } = vm.runInNewContext(source + '\n({ ClassroomRelay, defaultRoom });', {
     DurableObject: class { constructor(ctx, env) { this.ctx = ctx; this.env = env; } },
-    CORRECTIONS: { '3/01': { file: '/3/01.pdf' } }, Date: Clock,
+    CORRECTIONS: { '3/01': { file: '/3/01.pdf' }, '5/07': { file: '/5/07.pdf' }, '5/08': { file: '/5/08.pdf' } }, Date: Clock,
     TextEncoder, TextDecoder, Request, Response, ReadableStream, URL, Headers,
     atob, btoa, crypto: crypto.webcrypto,
   });
@@ -104,7 +104,10 @@ async function regressions() {
   try {
     const a = f.teacher('Mac'), b = f.teacher('PC');
     const pupil = f.socket('pupil', { activity: '3/01' });
+    const unrelated = f.socket('pupil', { activity: '5/08' });
     assert.equal((await f.command(b, 'correction', { enabled: true })).error, 'controller_required');
+    assert.equal((await f.command(a, 'correction', { enabled: true })).error, 'activity_required');
+    assert.equal((await f.command(a, 'activity', { activity: '3/01' })).ok, true);
     assert.equal((await f.command(a, 'correction', { enabled: true })).ok, true);
     const correction = () => f.relay.correctionRequest(new Request('https://example/correction?activity=3/01'));
     assert.equal((await correction()).status, 200);
@@ -129,10 +132,15 @@ async function regressions() {
     await f.message(b, { type: 'ping' });
     assert.equal(f.relay.deviceRows()[0].expiresAt, start + 35000, 'SQL presence writes are coalesced');
     f.wake();
+    assert.equal(f.relay.snapshot().targetActivity, '3/01', 'selected route survives instance reconstruction');
     f.setClock(start + 35001);
     f.relay.cleanupRemote();
     assert.equal(f.relay.devices().length, 2, 'WebSocket attachments retain contacts after SQL lease expires and instance wakes');
     assert.equal((await correction()).status, 200);
+    assert.equal(f.relay.pupilState('3/01').correction, true);
+    assert.equal(f.relay.pupilState('5/08').active, false);
+    assert.equal(f.relay.pupilState('5/08').correction, false);
+    assert.equal((await f.relay.correctionRequest(new Request('https://example/correction?activity=5/08'))).status, 403);
     const fileId = crypto.randomUUID();
     const fileUrl = `https://example/files?id=${fileId}&deviceId=${a.id}&part=0&parts=1`;
     const fileHeaders = { 'x-classroom-auth-nonce': a.nonce, 'x-classroom-auth-expires': String(start + 8 * 3600000) };
@@ -152,6 +160,7 @@ async function regressions() {
     const c = f.teacher('Mac reconnected');
     assert.equal(f.relay.remote().correction, false);
     await f.command(c, 'take-control');
+    await f.command(c, 'activity', { activity: '3/01' });
     await f.command(c, 'correction', { enabled: true });
     assert.equal((await correction()).status, 200);
     await f.relay.revokeTeacher(c.nonce, start + 8 * 3600000);
@@ -159,6 +168,18 @@ async function regressions() {
     assert.equal((await correction()).status, 403, 'logout invalidates cached room, devices and grant');
     assert.equal(f.relay.revoked(c.nonce), true);
     assert.equal(f.relay.validTeacher(c), null);
+    assert.equal(unrelated.messages.some(state => state.active || state.correction), false, 'unselected activity never receives a release');
+
+    const missing = f.teacher('Legacy room');
+    const oldRoom = f.relay.remote(); delete oldRoom.targetActivity; oldRoom.correction = true;
+    f.relay.sql('UPDATE remote_room SET value=? WHERE id=1', JSON.stringify(oldRoom));
+    f.wake();
+    assert.equal(f.relay.snapshot().targetActivity, null);
+    assert.equal(f.relay.pupilState('3/01').active, false);
+    assert.equal((await correction()).status, 403, 'a stored room from an older client must fail closed');
+    await f.command(missing, 'take-control');
+    await f.command(missing, 'activity', { activity: '5/07' });
+    assert.equal(f.relay.remote().correction, false, 'choosing a target must clear an old correction');
   } finally { f.close(); }
 }
 
@@ -167,6 +188,7 @@ async function sixHours(legacyNoise) {
   try {
     const a = f.teacher('Mac'), b = f.teacher('PC');
     for (let index = 0; index < 30; index++) f.socket('pupil', { activity: '3/01' });
+    await f.command(a, 'activity', { activity: '3/01' });
     await f.command(a, 'microphone', { enabled: true });
     await f.command(a, 'correction', { enabled: true });
     const step = legacyNoise ? 250 : 5000;

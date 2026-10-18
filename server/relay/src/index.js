@@ -107,7 +107,7 @@ function defaultRoom(now) {
   return { revision: 0, expiresAt: now + TTL, controller: null, microphone: null,
     display: { documents: [], activeId: null },
     tools: { message: MESSAGE, notice: null, timer: null, preferences: { threshold: 12, delay: 3, mode: 'cover', pulse: true } },
-    noise: { level: 0, alarm: false }, noiseAt: 0, testUntil: 0, pauseUntil: 0, linkActivities: true, correction: false };
+    noise: { level: 0, alarm: false }, noiseAt: 0, testUntil: 0, pauseUntil: 0, linkActivities: true, targetActivity: null, correction: false };
 }
 function cleanTools(input, now) {
   if (!input || !plainText(input.message, 120)) throw new Error('invalid_message');
@@ -302,7 +302,7 @@ export class ClassroomRelay extends DurableObject {
     if (current?.authNonce === nonce) {
       this.sql('INSERT INTO closed(sessionId,expiresAt) VALUES(?,?) ON CONFLICT(sessionId) DO UPDATE SET expiresAt=excluded.expiresAt', current.sessionId, Date.now() + 120000);
       this.sql('DELETE FROM state WHERE id=1');
-      this.broadcast(this.stored());
+      this.broadcast();
     }
     for (const device of this.deviceRows().filter(device => device.nonce === nonce)) this.removeDevice(device.deviceId, device.connectionId);
     for (const socket of this.ctx.getWebSockets()) if (this.attachment(socket)?.authNonce === nonce) try { socket.close(1008, 'Signed out'); } catch {}
@@ -335,19 +335,33 @@ export class ClassroomRelay extends DurableObject {
       try { activity = activityName(socket.deserializeAttachment()?.activity); } catch { /* Anciens modules sans pièce jointe. */ }
       counts.set(activity, (counts.get(activity) || 0) + 1);
     }
-    return { active, viewers: sockets.length, activities: [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([id, count]) => ({ id, count })) };
+    const target = this.targetActivity();
+    return { active: Boolean(active && target), viewers: target ? counts.get(target) || 0 : 0, totalViewers: sockets.length,
+      activities: [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([id, count]) => ({ id, count })) };
   }
-  broadcast(state) {
-    const message = JSON.stringify(this.remotePublicState() || this.publicState(state));
+  broadcast() {
+    const room = this.remote();
+    const target = this.targetActivity(room);
+    const neutral = JSON.stringify(this.publicState(null));
+    const message = target ? JSON.stringify(this.remotePublicState(Date.now(), room)) : neutral;
     for (const socket of this.ctx.getWebSockets()) {
-      if (this.attachment(socket)?.role === 'teacher' || socket.readyState !== 1) continue;
-      try { socket.send(message); } catch { try { socket.close(1011, 'Reconnect'); } catch {} }
+      const info = this.attachment(socket);
+      if (info?.role === 'teacher' || socket.readyState !== 1) continue;
+      try { socket.send(target && info?.activity === target ? message : neutral); } catch { try { socket.close(1011, 'Reconnect'); } catch {} }
     }
   }
   attachment(socket) { try { return socket.deserializeAttachment(); } catch { return null; } }
   remote() {
     const row = this.tableRows('remote_room')[0];
     return row ? JSON.parse(row.value) : null;
+  }
+  targetActivity(room = this.remote()) {
+    return typeof room?.targetActivity === 'string' && Object.hasOwn(CORRECTIONS, room.targetActivity) ? room.targetActivity : null;
+  }
+  pupilState(activity, now = Date.now()) {
+    const room = this.remote();
+    const target = this.targetActivity(room);
+    return target && activity === target ? this.remotePublicState(now, room) : this.publicState(null, now);
   }
   devices(now = Date.now()) {
     return this.deviceRows().map(row => ({ ...row, expiresAt: this.deviceExpiry(row) }))
@@ -433,12 +447,12 @@ export class ClassroomRelay extends DurableObject {
     this.alarmUpdate = this.alarmUpdate.catch(() => {}).then(update);
     return this.alarmUpdate;
   }
-  remotePublicState(now = Date.now()) {
-    const room = this.remote();
+  remotePublicState(now = Date.now(), room = this.remote()) {
     if (!room) return null;
     const devices = this.devices(now);
     const preferences = room.tools.preferences;
-    const active = Boolean(room.linkActivities && devices.length);
+    const active = Boolean(room.linkActivities && this.targetActivity(room) && devices.length);
+    if (!active) return this.publicState(null, now);
     return this.publicState({ expiresAt: active ? Math.max(...devices.map(device => device.expiresAt)) : 0,
       alarm: this.effectiveNoise(room, now).alarm, mode: preferences.mode, pulse: preferences.pulse,
       message: room.tools.message, notice: room.tools.notice, timer: room.tools.timer, correction: room.correction }, now);
@@ -450,8 +464,8 @@ export class ClassroomRelay extends DurableObject {
     return { type: 'remote', v: 1, revision: room.revision, serverNow: now,
       controller: room.controller, microphone: room.microphone,
       devices: this.devices(now).map(device => ({ deviceId: device.deviceId, label: device.label })),
-      display: room.display, tools: room.tools, noise: this.effectiveNoise(room, now), linkActivities: room.linkActivities, correction: Boolean(room.correction),
-      viewers: stats.viewers, activities: stats.activities };
+      display: room.display, tools: room.tools, noise: this.effectiveNoise(room, now), linkActivities: room.linkActivities, targetActivity: this.targetActivity(room), correction: Boolean(room.correction && this.targetActivity(room)),
+      viewers: stats.viewers, totalViewers: stats.totalViewers, activities: stats.activities };
   }
   effectiveNoise(room, now = Date.now()) {
     return { level: 0, alarm: Boolean(room.pauseUntil <= now && (room.noise.alarm || room.testUntil > now)), pausedUntil: room.pauseUntil || 0, testUntil: room.testUntil || 0 };
@@ -472,7 +486,7 @@ export class ClassroomRelay extends DurableObject {
         try { socket.send(message); } catch { try { socket.close(1011, 'Reconnect'); } catch {} }
       }
     }
-    this.broadcast(this.stored());
+    this.broadcast();
   }
   async teacherConnect(request) {
     const url = new URL(request.url);
@@ -568,7 +582,7 @@ export class ClassroomRelay extends DurableObject {
     if (this.cleanupRemote(now)) this.broadcastRemote();
     const activity = new URL(request.url).searchParams.get('activity');
     if (!activity || !Object.hasOwn(CORRECTIONS, activity)) return json({ error: 'not_found' }, 404);
-    const allowed = () => this.remotePublicState()?.correction === true;
+    const allowed = () => this.targetActivity() === activity && this.remotePublicState()?.correction === true;
     if (!allowed()) return json({ error: 'correction_hidden' }, 403);
     if (!this.env.CORRECTIONS) return json({ error: 'temporarily_unavailable' }, 503);
     const entry = CORRECTIONS[activity];
@@ -599,11 +613,11 @@ export class ClassroomRelay extends DurableObject {
     const path = new URL(request.url).pathname;
     if (path !== '/live' && path !== '/publish') return json({ error: 'not_found' }, 404);
     if (path === '/live') {
-      if (this.teacherStats(false).viewers >= 500) return json({ error: 'full' }, 503);
+      if (this.teacherStats(false).totalViewers >= 500) return json({ error: 'full' }, 503);
       const [client, server] = Object.values(new WebSocketPair());
       this.ctx.acceptWebSocket(server, ['pupil']);
       server.serializeAttachment({ role: 'pupil', activity: activityName(new URL(request.url).searchParams.get('activity')) });
-      server.send(JSON.stringify(this.remotePublicState() || this.publicState(this.stored())));
+      server.send(JSON.stringify(this.pupilState(this.attachment(server)?.activity)));
       this.broadcastRemote();
       return new Response(null, { status: 101, webSocket: client });
     }
@@ -627,7 +641,7 @@ export class ClassroomRelay extends DurableObject {
       if (current?.sessionId === body.sessionId) {
         this.sql('DELETE FROM state WHERE id=1');
         await this.scheduleAlarm();
-        this.broadcast(this.stored());
+        this.broadcast();
       }
       return json(this.teacherStats(false));
     }
@@ -665,7 +679,7 @@ export class ClassroomRelay extends DurableObject {
     this.sql('INSERT INTO state(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', JSON.stringify(state));
     await this.scheduleAlarm();
     // Une déconnexion arrivée pendant l'écriture de l'alarme garde la priorité.
-    this.broadcast(this.stored());
+    this.broadcast();
     return json(this.teacherStats(Boolean(this.stored()?.expiresAt > Date.now())));
   }
   async alarm() {
@@ -715,7 +729,7 @@ export class ClassroomRelay extends DurableObject {
     let error = null;
     let broadcast = true;
     try {
-      if (['display', 'tools', 'link', 'correction', 'test-alert', 'pause-alert'].includes(body.action) && room.controller?.deviceId !== info.deviceId) throw new Error('controller_required');
+      if (['display', 'tools', 'link', 'activity', 'correction', 'test-alert', 'pause-alert'].includes(body.action) && room.controller?.deviceId !== info.deviceId) throw new Error('controller_required');
       if (body.action === 'take-control') room.controller = { deviceId: info.deviceId, label: info.label };
       else if (body.action === 'display') {
         room.display = cleanDisplay(body.display, id => Boolean(this.file(id)?.complete && this.file(id).expiresAt > now));
@@ -726,9 +740,18 @@ export class ClassroomRelay extends DurableObject {
         if (typeof body.enabled !== 'boolean') throw new Error('invalid_link');
         room.linkActivities = body.enabled;
         if (!body.enabled) room.correction = false;
+      } else if (body.action === 'activity') {
+        if (body.activity !== null && (typeof body.activity !== 'string' || !Object.hasOwn(CORRECTIONS, body.activity))) throw new Error('invalid_activity');
+        if (body.activity !== this.targetActivity(room)) {
+          room.correction = false;
+          room.tools.notice = null;
+          room.tools.timer = null;
+        }
+        room.targetActivity = body.activity;
       } else if (body.action === 'correction') {
         if (typeof body.enabled !== 'boolean') throw new Error('invalid_correction');
         if (body.enabled && !room.linkActivities) throw new Error('activities_disabled');
+        if (body.enabled && !this.targetActivity(room)) throw new Error('activity_required');
         room.correction = body.enabled;
       } else if (body.action === 'microphone') {
         if (typeof body.enabled !== 'boolean') throw new Error('invalid_microphone');

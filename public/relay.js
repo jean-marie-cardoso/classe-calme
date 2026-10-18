@@ -17,6 +17,8 @@
   const maxFileSize = 15 * 1024 * 1024;
   const noiseRetryInterval = 10000;
   const heartbeatInterval = 15000;
+  const activities = new Map((Array.isArray(window.ClasseCalmeActivities) ? window.ClasseCalmeActivities : [])
+    .filter(item => item && typeof item.id === 'string' && typeof item.title === 'string').map(item => [item.id, item]));
   const pending = new Map(), uploading = new Map(), knownFiles = new Set(), downloaded = new Map();
   const roomWaiters = new Set();
   let socket = null, generation = 0, reconnectTimer = null, pingTimer = null;
@@ -24,6 +26,7 @@
   let room = null, highestRevision = -1, applyingTools = false, activityStats = [];
   let displayVersion = 0, displaySent = 0, displayBusy = false, displayApplyBusy = false, appliedDisplay = '', lastDisplaySent = '';
   let toolsVersion = 0, toolsSent = 0, toolsBusy = false, appliedTools = '', toolTimer = null, lastToolsSent = '';
+  let toolsEpoch = 0;
   let transferController = new AbortController(), clockOffset = 0;
   let micAttempt = 0, micClaimPending = false, localMicIntent = false, latestNoise = { level: 0, alarm: false };
   let noiseTimer = null, lastNoiseSent = -Infinity, lastNoisePacket = null, noiseRetry = false, micOwned = false;
@@ -31,6 +34,7 @@
   let takingControl = false, errorMessage = '';
   let controllerLocalDisplay = false, controllerLocalTools = false;
   let correctionBusy = false, correctionAttempt = 0, correctionError = '';
+  let activityBusy = false, activityAttempt = 0, activityError = '', requestedActivity = null;
 
   const control = document.createElement('button');
   control.id = 'remoteControl';
@@ -45,8 +49,44 @@
   microphoneSource.setAttribute('role', 'status');
   status.before(remoteStatus, microphoneSource);
   let correctionButton = null, correctionFeedback = null;
+  let activitySelect = null, activityFeedback = null;
   const toolsPanel = byId('toolsPopup');
   if (checkbox && toolsPanel) {
+    const activitySection = document.createElement('section');
+    activitySection.className = 'tool-section';
+    const activityHeading = document.createElement('h3');
+    activityHeading.id = 'courseActivityHeading';
+    activityHeading.textContent = 'Activité du cours';
+    activitySelect = document.createElement('select');
+    activitySelect.id = 'courseActivity';
+    activitySelect.style.width = '100%';
+    activitySelect.setAttribute('aria-labelledby', activityHeading.id);
+    activitySelect.setAttribute('aria-describedby', 'courseActivityFeedback');
+    const emptyOption = document.createElement('option');
+    emptyOption.value = '';
+    emptyOption.textContent = 'Choisir une activité…';
+    activitySelect.append(emptyOption);
+    for (const group of ['5', '4', '3', 'bonus']) {
+      const choices = [...activities.values()].filter(item => group === 'bonus' ? item.id.startsWith('bonus/') : item.id.startsWith(group + '/'));
+      if (!choices.length) continue;
+      const optionGroup = document.createElement('optgroup');
+      optionGroup.label = group === 'bonus' ? 'Bonus' : group + 'e';
+      for (const item of choices.sort((a, b) => a.id.localeCompare(b.id))) {
+        const option = document.createElement('option');
+        option.value = item.id;
+        option.textContent = item.title;
+        optionGroup.append(option);
+      }
+      activitySelect.append(optionGroup);
+    }
+    activityFeedback = document.createElement('p');
+    activityFeedback.id = 'courseActivityFeedback';
+    activityFeedback.className = 'hint';
+    activityFeedback.setAttribute('role', 'status');
+    activitySection.append(activityHeading, activitySelect, activityFeedback);
+    toolsPanel.insertBefore(activitySection, toolsPanel.querySelector('.tool-section'));
+    activitySelect.addEventListener('change', () => { void selectActivity(activitySelect.value || null); });
+
     const section = document.createElement('section');
     section.className = 'tool-section';
     section.setAttribute('aria-labelledby', 'correctionHeading');
@@ -77,7 +117,15 @@
   }
   function isReady() { return received && socket?.readyState === WebSocket.OPEN && Boolean(auth.getGrant()); }
   function isController() { return isReady() && room?.controller?.deviceId === deviceId; }
+  function targetActivity() { return isReady() && activities.has(room?.targetActivity) ? room.targetActivity : null; }
+  function shortActivityName(id) {
+    const sequence = /^([345])\/(\d{2})$/.exec(id);
+    if (sequence) return sequence[1] + 'e S' + sequence[2];
+    const bonus = /^bonus\/([345])-(\d{2})$/.exec(id);
+    return bonus ? 'Bonus ' + bonus[1] + 'e ' + bonus[2] : 'Activité';
+  }
   function activityName(id) {
+    if (activities.has(id)) return activities.get(id).title;
     if (id === 'accueil') return 'Accueil du labo';
     const sequence = /^([345])\/(\d{2})$/.exec(id);
     if (sequence) return sequence[1] + 'e · Activité ' + sequence[2];
@@ -98,7 +146,7 @@
       const row = document.createElement('div');
       row.className = 'activity-row';
       const name = document.createElement('span');
-      name.textContent = activityName(item.id);
+      name.textContent = (item.id === targetActivity() ? '✓ ' : '') + activityName(item.id);
       const count = document.createElement('strong');
       count.textContent = item.count;
       row.append(name, count);
@@ -112,20 +160,30 @@
     panel.hidden = !open;
     connections?.setAttribute('aria-expanded', String(open));
   }
-  connections?.addEventListener('click', () => { renderConnections(); showConnections(byId('activitySummary').hidden); });
+  connections?.addEventListener('click', () => {
+    if (!targetActivity()) { tools?.openPanel(); activitySelect?.focus(); return; }
+    renderConnections(); showConnections(byId('activitySummary').hidden);
+  });
   byId('closeActivities')?.addEventListener('click', () => { showConnections(false); connections?.focus(); });
   document.addEventListener('classe-calme:close-connections', () => showConnections(false));
   document.addEventListener('keydown', event => { if (event.key === 'Escape') showConnections(false); });
 
   function setError(text) { errorMessage = text; renderStatus(); }
+  function renderActivity() {
+    if (!activitySelect) return;
+    activitySelect.value = (activityBusy ? requestedActivity : targetActivity()) || '';
+    activitySelect.disabled = activityBusy || takingControl || !activities.size;
+    activityFeedback.textContent = activityError || (!activities.size ? 'Liste indisponible. Recharge la page.' : activityBusy ? 'Envoi…' : !targetActivity() ? 'Choisis l’activité à relier.' : '');
+    activityFeedback.hidden = !activityFeedback.textContent;
+  }
   function renderCorrection() {
     if (!correctionButton) return;
     const ready = isReady();
     const enabled = ready && room.correction === true;
     correctionButton.textContent = enabled ? 'Masquer la correction' : 'Afficher la correction';
     correctionButton.setAttribute('aria-pressed', String(enabled));
-    correctionButton.disabled = correctionBusy || takingControl || (ready ? !room.linkActivities : !checkbox.checked);
-    correctionButton.title = (ready ? room.linkActivities : checkbox.checked) ? '' : 'Active « Lier mes activités ».';
+    correctionButton.disabled = correctionBusy || activityBusy || takingControl || !targetActivity() || (ready ? !room.linkActivities : !checkbox.checked);
+    correctionButton.title = !targetActivity() ? 'Choisis l’activité du cours.' : (ready ? room.linkActivities : checkbox.checked) ? '' : 'Active « Lier mes activités ».';
     correctionFeedback.textContent = correctionError || (correctionBusy ? 'Envoi…' : auth.getGrant() && !ready ? 'Connexion…' : '');
     correctionFeedback.hidden = !correctionFeedback.textContent;
   }
@@ -146,15 +204,18 @@
       byId('pause').setAttribute('aria-pressed', String(globallyPaused));
     } else if (ready) byId('pause').disabled = globallyPaused || !display.getMicrophoneState();
     const counted = ready && room.linkActivities;
+    const target = targetActivity();
+    const count = counted && target ? (Number.isInteger(room.viewers) ? room.viewers : room.activities?.find(item => item.id === target)?.count || 0) : 0;
     checkbox.disabled = ready && !controlling;
-    status.textContent = !counted ? ready ? 'Activités : désactivées' : checkbox.checked ? 'Connexion prof requise' : 'Activités : désactivées' : 'Activités : ' + room.viewers + (room.viewers === 1 ? ' page connectée' : ' pages connectées');
-    connections.hidden = !counted;
-    if (counted) {
-      connections.textContent = room.viewers + (room.viewers === 1 ? ' connexion' : ' connexions');
-      connections.setAttribute('aria-label', status.textContent);
-    } else showConnections(false);
-    activityStats = counted && Array.isArray(room.activities) ? room.activities.filter(item => item && typeof item.id === 'string' && item.id.length <= 40 && Number.isInteger(item.count) && item.count > 0).slice(0, 100) : [];
+    status.textContent = !counted ? ready ? 'Activités : désactivées' : checkbox.checked ? 'Connexion prof requise' : 'Activités : désactivées' : !target ? 'Choisis l’activité du cours.' : shortActivityName(target) + ' · ' + count + (count === 1 ? ' page connectée' : ' pages connectées');
+    connections.hidden = false;
+    connections.textContent = target ? shortActivityName(target) + ' · ' + count + (count === 1 ? ' connexion' : ' connexions') : 'Choisir une activité';
+    connections.setAttribute('aria-label', target ? status.textContent : 'Choisir l’activité du cours');
+    connections.title = target ? activityName(target) : 'Activité du cours';
+    if (!ready || !target) showConnections(false);
+    activityStats = ready && Array.isArray(room.activities) ? room.activities.filter(item => item && typeof item.id === 'string' && item.id.length <= 40 && Number.isInteger(item.count) && item.count > 0).slice(0, 100) : [];
     if (!byId('activitySummary')?.hidden) renderConnections();
+    renderActivity();
     renderCorrection();
   }
   function setFollowing(value) {
@@ -167,6 +228,7 @@
   }
   function requestControl() {
     if (document.activeElement === correctionButton) correctionError = 'Clique sur « Prendre la main ».';
+    if (activitySelect && (document.activeElement === activitySelect || activitySelect.value !== (targetActivity() || ''))) activityError = 'Clique sur « Prendre la main ».';
     setError('Clique sur « Prendre la main ».');
     control.focus();
   }
@@ -221,7 +283,7 @@
       requestControl();
       return;
     }
-    if (!room.linkActivities) { renderCorrection(); return; }
+    if (!room.linkActivities || !targetActivity() || activityBusy) { renderCorrection(); return; }
     const enabled = room.correction !== true;
     const currentGeneration = generation;
     const attempt = ++correctionAttempt;
@@ -237,6 +299,50 @@
       if (generation === currentGeneration && attempt === correctionAttempt) {
         correctionBusy = false;
         renderCorrection();
+      }
+    }
+  }
+  function discardPendingTools() {
+    toolsEpoch++;
+    clearTimeout(toolTimer); toolTimer = null;
+    toolsSent = toolsVersion;
+    controllerLocalTools = false;
+  }
+  async function selectActivity(activity) {
+    if (activityBusy) return;
+    activityError = '';
+    if (activity !== null && !activities.has(activity)) { renderActivity(); return; }
+    if (!auth.getGrant()) { activityError = 'Connexion prof requise.'; renderActivity(); auth.connect(); return; }
+    if (!isReady()) { activityError = 'Connexion…'; connect(); renderActivity(); return; }
+    if (!isController()) { activityError = 'Clique sur « Prendre la main ».'; requestControl(); renderActivity(); return; }
+    const previousTarget = room.targetActivity || null;
+    if (activity === previousTarget) { renderActivity(); return; }
+    const previousLocalTools = controllerLocalTools;
+    const previousToolsSent = lastToolsSent;
+    const currentGeneration = generation;
+    const attempt = ++activityAttempt;
+    activityBusy = true;
+    requestedActivity = activity;
+    discardPendingTools();
+    renderStatus();
+    try {
+      await command('activity', { activity });
+      if (generation !== currentGeneration || attempt !== activityAttempt) return;
+      await waitForRoom(() => isReady() && (room.targetActivity || null) === activity);
+      if (generation === currentGeneration && attempt === activityAttempt) activityError = '';
+    } catch {
+      if (generation === currentGeneration && attempt === activityAttempt && (room?.targetActivity || null) !== activity) {
+        activityError = 'Activité non envoyée. Réessaie.';
+        if ((room?.targetActivity || null) === previousTarget) {
+          controllerLocalTools = previousLocalTools;
+          lastToolsSent = previousToolsSent;
+        }
+      }
+    } finally {
+      if (generation === currentGeneration && attempt === activityAttempt) {
+        activityBusy = false;
+        requestedActivity = null;
+        renderStatus();
       }
     }
   }
@@ -341,7 +447,7 @@
     }
   }
   function queueTools() {
-    if (applyingTools || !isController()) return;
+    if (applyingTools || activityBusy || !isController()) return;
     if (toolsSent === toolsVersion && JSON.stringify(toolsSnapshot()) === lastToolsSent) return;
     controllerLocalTools = true;
     toolsVersion++;
@@ -349,29 +455,30 @@
     toolTimer = setTimeout(() => { toolTimer = null; void flushTools(); }, 100);
   }
   async function flushTools() {
-    if (toolsBusy || !isController() || toolsSent === toolsVersion) return;
+    if (toolsBusy || activityBusy || !isController() || toolsSent === toolsVersion) return;
     toolsBusy = true;
     const currentGeneration = generation;
+    const epoch = toolsEpoch;
     try {
-      while (isController() && currentGeneration === generation && toolsSent !== toolsVersion) {
+      while (isController() && !activityBusy && currentGeneration === generation && epoch === toolsEpoch && toolsSent !== toolsVersion) {
         const version = toolsVersion;
         const value = toolsSnapshot();
         const signature = JSON.stringify(value);
         if (signature === lastToolsSent) { toolsSent = version; continue; }
         await command('tools', { tools: localTools(value) });
-        if (generation !== currentGeneration) return;
+        if (generation !== currentGeneration || epoch !== toolsEpoch) return;
         toolsSent = version;
         lastToolsSent = signature;
       }
     } catch {
-      if (currentGeneration === generation && isController()) { toolsSent = toolsVersion; setError('Modification non envoyée. Réessaie.'); }
+      if (currentGeneration === generation && epoch === toolsEpoch && isController()) { toolsSent = toolsVersion; setError('Modification non envoyée. Réessaie.'); }
     } finally {
       toolsBusy = false;
-      if (toolsSent !== toolsVersion) void flushTools();
+      if (!activityBusy && toolsSent !== toolsVersion) void flushTools();
     }
   }
-  function applyRemoteTools() {
-    if (!room || (isController() && (controllerLocalTools || toolsBusy || toolsVersion !== toolsSent))) return;
+  function applyRemoteTools(force = false) {
+    if (!room || (!force && isController() && (controllerLocalTools || toolsBusy || toolsVersion !== toolsSent))) return;
     const signature = JSON.stringify(room.tools);
     if (appliedTools === signature) return;
     applyingTools = true;
@@ -422,6 +529,7 @@
     if (!value || value.type !== 'remote' || value.v !== 1 || !Number.isFinite(value.revision) || value.revision < highestRevision || !value.display || !value.tools || !Array.isArray(value.devices)) return;
     const wasController = isController();
     const correctionChanged = room?.correction !== value.correction;
+    const targetChanged = received && (room?.targetActivity || null) !== (value.targetActivity || null);
     const firstSnapshot = !received;
     highestRevision = value.revision;
     room = value;
@@ -436,6 +544,10 @@
       correctionAttempt++;
       correctionBusy = false;
       correctionError = '';
+      activityAttempt++;
+      activityBusy = false;
+      requestedActivity = null;
+      activityError = '';
       transferController.abort();
       transferController = new AbortController();
       displaySent = displayVersion;
@@ -443,11 +555,17 @@
       controllerLocalDisplay = controllerLocalTools = false;
       errorMessage = '';
     }
+    if (targetChanged) {
+      discardPendingTools();
+      appliedTools = lastToolsSent = '';
+      correctionError = '';
+      activityError = '';
+    }
     if (correctionChanged || (!wasController && controlling)) correctionError = '';
     setFollowing(!controlling);
     if (!controlling && (firstSnapshot || wasController)) window.updateProjection?.(true);
     const localState = display.getState();
-    const initializeLocal = firstSnapshot && controlling && value.display.documents.length === 0;
+    const initializeLocal = firstSnapshot && controlling && value.display.documents.length === 0 && !value.targetActivity;
     initialized = true;
     if (initializeLocal) {
       if (localState.documents.length) queueDisplay();
@@ -456,7 +574,7 @@
       if (Boolean(value.linkActivities) !== checkbox.checked) void command('link', { enabled: checkbox.checked }).catch(() => {});
     } else {
       checkbox.checked = Boolean(value.linkActivities);
-      applyRemoteTools();
+      applyRemoteTools(targetChanged);
       void applyRemoteDisplay();
     }
     applyNoise();
@@ -470,6 +588,11 @@
     correctionAttempt++;
     correctionBusy = false;
     correctionError = '';
+    activityAttempt++;
+    activityBusy = false;
+    requestedActivity = null;
+    activityError = '';
+    toolsEpoch++;
     clearTimeout(pingTimer); pingTimer = null;
     clearTimeout(toolTimer); toolTimer = null;
     clearTimeout(noiseTimer); noiseTimer = null;

@@ -9,7 +9,7 @@ function setup() {
  let now=0,nextTimer=0,mic=false,stops=0,revision=0;
  const timers=new Map(),elements=new Map(),sent=[];
  class El extends EventTarget {
-  constructor(){super();this.hidden=false;this.checked=true;this.disabled=false;this.value='55';this.dataset={};this.textContent='';this.classList={toggle(){}};}
+  constructor(){super();this.hidden=false;this.checked=true;this.disabled=false;this.value='55';this.style={};this.dataset={};this.textContent='';this.classList={toggle(){}};}
   set id(v){this._id=v;elements.set(v,this);}get id(){return this._id;}
   setAttribute(){} append(){} before(){} replaceChildren(){} insertBefore(){} focus(){}querySelector(){return null;}
  }
@@ -23,8 +23,8 @@ function setup() {
  let room=null;
  const timer=(fn,ms)=>{const id=++nextTimer;timers.set(id,{at:now+ms,fn});return id;};
  class Socket extends EventTarget {
-  static OPEN=1;readyState=0;holdNoise=false;
-  constructor(url){super();this.id=new URL(url).searchParams.get('deviceId');ctx.socket=this;timer(()=>{this.readyState=1;this.dispatchEvent(new Event('open'));room={type:'remote',v:1,revision:0,serverNow:Date.now(),display:displayState,tools:structuredClone(toolsState),devices:[{deviceId:this.id,label:'Mac'}],controller:{deviceId:this.id,label:'Mac'},microphone:null,noise:{level:0,alarm:false},linkActivities:true,viewers:0,activities:[]};this.emit();},0);}
+  static OPEN=1;readyState=0;holdNoise=false;holdTools=false;
+  constructor(url){super();this.id=new URL(url).searchParams.get('deviceId');ctx.socket=this;timer(()=>{this.readyState=1;this.dispatchEvent(new Event('open'));room={type:'remote',v:1,revision:0,serverNow:Date.now(),display:displayState,tools:structuredClone(toolsState),devices:[{deviceId:this.id,label:'Mac'}],controller:{deviceId:this.id,label:'Mac'},microphone:null,noise:{level:0,alarm:false},linkActivities:true,targetActivity:null,viewers:0,totalViewers:0,activities:[]};this.emit();},0);}
   message(value){this.dispatchEvent(new MessageEvent('message',{data:JSON.stringify(value)}));}
   emit(patch={}){room={...room,...patch,revision:++revision,serverNow:base+now};this.message(room);}
   send(raw){const c=JSON.parse(raw);sent.push({...c,at:now});if(c.type==='ping')return;
@@ -33,9 +33,11 @@ function setup() {
    if(c.action==='tools')room.tools=c.tools;
    if(c.action==='display')room.display=c.display;
    if(c.action==='take-control')room.controller={deviceId:this.id,label:'Mac'};
+   if(c.action==='activity'&&c.activity!==room.targetActivity){room.targetActivity=c.activity;room.correction=false;room.tools={...room.tools,notice:null,timer:null};}
    if(c.action==='correction')room.correction=c.enabled;
    if(c.action==='link')room.linkActivities=c.enabled;
    if(c.action==='noise'&&this.holdNoise)return;
+   if(c.action==='tools'&&this.holdTools)return;
    queueMicrotask(()=>{this.message({type:'ack',requestId:c.requestId,ok:true});this.emit();});
   }
   close(){this.readyState=3;this.dispatchEvent(new Event('close'));}
@@ -44,6 +46,7 @@ function setup() {
  class ClockDate extends Date {static now(){return base+now;}}
  const window=new EventTarget();
  const ctx={window,document,navigator:{platform:'Mac'},crypto,URL,WebSocket:Socket,AbortController,Event,CustomEvent,Date:ClockDate,performance:{now:()=>now},setTimeout:timer,clearTimeout:id=>timers.delete(id),clearInterval:id=>timers.delete(id),localStorage:{getItem:()=>null,setItem(){}},fetch:async()=>({status:404}),console};
+ window.ClasseCalmeActivities=[{id:'3/01',title:'3e · S01'},{id:'5/07',title:'5e · S07'},{id:'5/08',title:'5e · S08'}];
  window.ClasseCalmeAuth={getGrant:()=> 'test-grant',getChannel:()=> 'test',canAutoConnect:()=>false,connect(){},clearGrant(){}};
  window.ClasseCalmeDisplay={getState:()=>structuredClone(displayState),getFile:()=>null,applyState:async value=>{displayState=structuredClone(value);},getMicrophoneState:()=>mic,setFollowing(){},setRemoteNoise(){},stopMicrophone(){mic=false;stops++;document.dispatchEvent(new CustomEvent('classe-calme:microphone',{detail:{active:false}}));}};
  window.ClasseCalmeTools={getBroadcastState:()=>structuredClone(toolsState),setFollowing(){},closePanel(){},applyBroadcastState(value){toolsState=structuredClone(value);}};
@@ -55,6 +58,47 @@ function setup() {
 }
 const counts=h=>({noise:h.sent.filter(c=>c.action==='noise').length,ping:h.sent.filter(c=>c.type==='ping').length,tools:h.sent.filter(c=>c.action==='tools').length,display:h.sent.filter(c=>c.action==='display').length});
 (async()=>{
+ const target=setup();await target.advance(1000);
+ assert.equal(target.room.targetActivity,null);
+ assert.equal(target.sent.some(c=>c.action==='activity'),false,'no activity restored automatically');
+ assert.equal(target.document.getElementById('toggleCorrection').disabled,true,'correction requires an exact activity');
+ const selector=target.document.getElementById('courseActivity');
+ selector.value='5/07';selector.dispatchEvent(new Event('change'));await turns();
+ assert.equal(target.sent.filter(c=>c.action==='activity').at(-1).activity,'5/07');
+ assert.equal(target.room.targetActivity,'5/07');assert.equal(selector.value,'5/07');
+ assert.equal(target.document.getElementById('toggleCorrection').disabled,false);
+ target.ctx.window.ClasseCalmeTools.applyBroadcastState({...target.room.tools,notice:{text:'PRIVATE_5S07',until:Date.now()+60000},timer:{state:'running',until:Date.now()+60000}});
+ target.document.dispatchEvent(new Event('classe-calme:state'));await target.advance(500);
+ const beforeSwitch=target.sent.length;
+ selector.value='3/01';selector.dispatchEvent(new Event('change'));await turns();await target.advance(500);
+ assert.equal(target.room.targetActivity,'3/01');assert.equal(target.room.correction,false);
+ assert.equal(target.ctx.window.ClasseCalmeTools.getBroadcastState().notice,null);
+ assert.equal(target.ctx.window.ClasseCalmeTools.getBroadcastState().timer,null);
+ assert.equal(target.sent.slice(beforeSwitch).filter(c=>c.action==='tools').length,0,'switch must not resend the old timer or notice');
+ const switches=target.sent.filter(c=>c.action==='activity').length;
+ selector.dispatchEvent(new Event('change'));await turns();assert.equal(target.sent.filter(c=>c.action==='activity').length,switches,'same selection is silent');
+ selector.value='5/99';selector.dispatchEvent(new Event('change'));await turns();assert.equal(target.room.targetActivity,'3/01');assert.equal(selector.value,'3/01');
+ target.ctx.socket.emit({controller:{deviceId:'other',label:'PC'},targetActivity:'5/08'});await turns();
+ assert.equal(selector.value,'5/08','follower reflects the server activity');
+ selector.value='5/07';selector.dispatchEvent(new Event('change'));await turns();
+ assert.equal(target.room.targetActivity,'5/08');assert.equal(target.sent.filter(c=>c.action==='activity').length,switches,'follower cannot choose a target');
+ target.ctx.socket.emit({controller:{deviceId:target.ctx.socket.id,label:'Mac'}});await turns();
+ selector.value='';selector.dispatchEvent(new Event('change'));await turns();
+ assert.equal(target.room.targetActivity,null);assert.equal(target.document.getElementById('toggleCorrection').disabled,true);
+ const delayedTools=setup();await delayedTools.advance(1000);
+ const delayedSelect=delayedTools.document.getElementById('courseActivity');
+ delayedSelect.value='5/07';delayedSelect.dispatchEvent(new Event('change'));await turns();
+ delayedTools.ctx.socket.holdTools=true;
+ delayedTools.ctx.window.ClasseCalmeTools.applyBroadcastState({...delayedTools.room.tools,notice:{text:'PRIVATE_OLD_TARGET',until:Date.now()+60000},timer:{state:'running',until:Date.now()+60000}});
+ delayedTools.document.dispatchEvent(new Event('classe-calme:state'));await delayedTools.advance(150);
+ const oldTools=delayedTools.sent.filter(c=>c.action==='tools').at(-1);assert.ok(oldTools);
+ delayedSelect.value='3/01';delayedSelect.dispatchEvent(new Event('change'));await turns();
+ delayedTools.ctx.socket.message({type:'ack',requestId:oldTools.requestId,ok:true});await turns();
+ delayedTools.ctx.socket.holdTools=false;await delayedTools.advance(1000);
+ assert.equal(delayedTools.room.targetActivity,'3/01');
+ assert.equal(delayedTools.ctx.window.ClasseCalmeTools.getBroadcastState().notice,null,'late old-target ACK cannot restore the notice');
+ assert.equal(delayedTools.ctx.window.ClasseCalmeTools.getBroadcastState().timer,null,'late old-target ACK cannot restore the timer');
+ assert.equal(delayedTools.sent.filter(c=>c.action==='tools').at(-1).requestId,oldTools.requestId,'late ACK must not requeue the old course tools');
  const variable=setup();await variable.advance(1000);await variable.activate();variable.sent.length=0;
  for(let i=1;i<=6*3600*4;i++){await variable.advance(250);variable.emitNoise(10+i%70);await turns();}
  const varied=counts(variable);assert.equal(varied.noise,0);assert.equal(varied.ping,1440);assert.equal(varied.tools,0);assert.equal(varied.display,0);
@@ -85,5 +129,5 @@ const counts=h=>({noise:h.sent.filter(c=>c.action==='noise').length,ping:h.sent.
  const retry=setup();await retry.advance(1000);await retry.activate();retry.sent.length=0;retry.ctx.socket.holdNoise=true;retry.emitNoise(90,true);await turns();
  for(let i=0;i<79;i++){await retry.advance(250);retry.emitNoise(20+i%70,true);await turns();}
  assert.equal(counts(retry).noise,1);await retry.advance(250);assert.equal(counts(retry).noise,2);
- console.log(JSON.stringify({virtualHours:6,variable:varied,constant:stable,twoTeachersIdlePings:varied.ping+stable.ping,assertions:'no remote gauge measurements; alarm changes immediate despite pending ACK; repeated snapshots silent; microphone follows its owner independently of controller; mirror without local microphone silent; unchanged tools and display silent'}));
+ console.log(JSON.stringify({virtualHours:6,variable:varied,constant:stable,twoTeachersIdlePings:varied.ping+stable.ping,assertions:'explicit server-backed activity only; no target restored automatically; target switch clears old tools; follower cannot retarget; null disables release; no remote gauge measurements; alarm changes immediate despite pending ACK; repeated snapshots silent; microphone follows its owner independently of controller; mirror without local microphone silent; unchanged tools and display silent'}));
 })().catch(error=>{console.error(error);process.exitCode=1;});

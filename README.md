@@ -31,15 +31,17 @@ Les pages du [labo techno](https://jean-marie-cardoso.github.io/labo-techno/) re
 
 L’adresse et le code sont publics. Le mot de passe et la vérification des droits restent côté serveur : ouvrir le lien ne permet pas de commander les activités. Les élèves n’ont aucun mot de passe à saisir.
 
-Les liens d’activité habituels ne changent pas. La liaison est commune à toutes les activités : une activité ouverte hors de la salle peut aussi recevoir l’alerte. Quand le dernier appareil professeur se déconnecte, la liaison s’arrête ; sans réseau, elle expire au plus tard après 35 secondes. Un appareil suiveur reste relié aux activités même quand le pilote est fermé.
+Les liens d’activité habituels ne changent pas. Dans **Outils → Activité du cours**, choisir l’activité exacte : seules ses pages reçoivent les alertes, consignes, minuteur et correction. Les autres activités restent inactives. Sans sélection, rien n’est transmis aux élèves. Le choix est partagé entre les appareils professeur ; seul le pilote peut le modifier. Changer d’activité retire l’ancienne correction, la consigne et le minuteur. La projection et le micro restent utilisables.
+
+Une page ouverte chez soi sur cette même activité reste concernée : le choix distingue les activités, pas la position des élèves. Quand le dernier appareil professeur se déconnecte, la liaison s’arrête ; sans réseau, elle expire au plus tard après 35 secondes. Un appareil suiveur reste relié aux activités même quand le pilote est fermé.
 
 Dans la version personnelle, le minuteur, les consignes et le texte de l’alerte sont aussi envoyés aux activités. Le minuteur apparaît dans un coin et suit les pauses, reprises et remises à zéro du professeur. Cliquer sur le nombre de connexions affiche leur répartition par activité. Il s’agit de pages ouvertes, pas de personnes : plusieurs onglets peuvent compter plusieurs fois. Ce détail reste réservé au professeur. La version à partager affiche les outils uniquement sur la projection.
 
 ### Diffuser la correction
 
-Dans la version personnelle, ouvrir **Outils → Correction → Afficher la correction**. Il faut être connecté comme professeur, piloter les écrans et avoir activé **Lier mes activités**. Le bouton suit le même état sur les appareils professeur.
+Dans la version personnelle, choisir l’activité du cours puis ouvrir **Outils → Correction → Afficher la correction**. Il faut être connecté comme professeur, piloter les écrans et avoir activé **Lier mes activités**. Le bouton suit le même état sur les appareils professeur.
 
-Chaque activité affiche son propre PDF **Corrigé élève**, au-dessus de la page. Chaque élève peut changer de page et régler le zoom indépendamment. **Retour à l’activité** permet de reprendre l’exercice ; **Revoir la correction** rouvre le document tant que le professeur le laisse disponible. Le document projeté par le professeur reste inchangé.
+Seule l’activité choisie affiche son PDF **Corrigé élève**, au-dessus de la page. Chaque élève peut changer de page et régler le zoom indépendamment. **Retour à l’activité** permet de reprendre l’exercice ; **Revoir la correction** rouvre le document tant que le professeur le laisse disponible. Le document projeté par le professeur reste inchangé.
 
 **Masquer la correction** retire le lecteur et bloque les nouvelles lectures du PDF. Désactiver la liaison aux activités ou déconnecter le dernier appareil professeur coupe aussi cet accès ; en cas de perte réseau, il expire sous 35 secondes. Une copie déjà reçue ne peut pas être effacée à distance. Cette fonction est absente de la version à partager.
 
@@ -74,4 +76,6 @@ node server/relay/scripts/prepare-corrections.mjs "$COURSE_ROOT" "$CORRECTIONS_M
 
 Relancer cette préparation puis publier le relais après une modification des corrigés. Le script vérifie toutes les correspondances avant de remplacer les fichiers préparés. Il refuse les PDF invalides, les fichiers supérieurs à 15 Mio et un ensemble supérieur à 60 Mio.
 
-`server/relay/correction-assets/` reste exclu de Git et de GitHub Pages. Seul `server/relay/src/corrections-catalog.js` est versionné. Le relais sert ces PDF par son binding interne : les chemins bruts restent fermés, et `/correction?activity=…` exige une diffusion autorisée avec au moins un appareil professeur actif. Les réponses sont envoyées sans mise en cache. Conserver `assets.run_worker_first: true` dans la configuration du relais pour protéger tous les chemins des fichiers.
+`server/relay/correction-assets/` reste exclu de Git et de GitHub Pages. Seul `server/relay/src/corrections-catalog.js` est versionné. Le relais sert ces PDF par son binding interne : les chemins bruts restent fermés, et `/correction?activity=…` exige une diffusion autorisée pour l’activité choisie avec au moins un appareil professeur actif. Les réponses sont envoyées sans mise en cache. Conserver `assets.run_worker_first: true` dans la configuration du relais pour protéger tous les chemins des fichiers.
+
+La préparation actualise aussi `public/activities.js`, qui contient uniquement les identifiants et titres des activités pour le sélecteur professeur. Pour régénérer cette liste depuis le catalogue existant sans recopier les PDF, lancer `node server/relay/scripts/write-activities.mjs`.
