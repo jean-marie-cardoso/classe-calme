@@ -10,12 +10,13 @@ const outputPath = path.resolve(path.dirname(scriptPath), '../../../public/activ
 
 export async function writeActivities(activities) {
   if (!Array.isArray(activities) || !activities.length) throw new Error('Liste des activités vide.');
+  activities = activities.filter(item => !/^(projets|exposes)\//.test(item.id)).concat([{"id": "projets/5", "title": "5e · Projet maison 3D et réseau", "correction": false}, {"id": "projets/4", "title": "4e · Projet Pong à deux et réseau", "correction": false}, {"id": "projets/3", "title": "3e · Projet objet 3D", "correction": false}, {"id": "exposes/5", "title": "5e · Exposé : un objet du quotidien", "correction": false}, {"id": "exposes/4", "title": "4e · Exposé : une technologie du téléphone", "correction": false}, {"id": "exposes/3", "title": "3e · Exposé : fabriquer ou réparer", "correction": false}]);
   const seen = new Set();
-  const entries = activities.map(({ id, title }) => {
-    if (typeof id !== 'string' || !/^(?:[345]\/\d{2}|bonus\/[345]-\d{2})$/.test(id) || seen.has(id)) throw new Error('Activité invalide.');
+  const entries = activities.map(({ id, title, correction = true }) => {
+    if (typeof id !== 'string' || !/^(?:[345]\/\d{2}|bonus\/[345]-\d{2}|(?:projets|exposes)\/[345])$/.test(id) || seen.has(id)) throw new Error('Activité invalide.');
     if (typeof title !== 'string' || !title.trim() || title.length > 300) throw new Error('Titre d’activité invalide.');
     seen.add(id);
-    return { id, title };
+    return { id, title, correction };
   });
   const source = '// Generated from the activity catalog. No PDF or private data.\n'
     + 'window.ClasseCalmeActivities = Object.freeze([\n'

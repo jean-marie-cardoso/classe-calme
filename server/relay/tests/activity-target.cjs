@@ -128,6 +128,19 @@ const correction = activity => req('/correction?activity=' + encodeURIComponent(
     assert.equal((await a.command('activity', { activity: invalid })).error, 'invalid_activity');
   }
   assert.equal(a.state().targetActivity, null);
+  for (const id of ['projets/5','projets/4','projets/3','exposes/5','exposes/4','exposes/3']) {
+    const guide = await pupil(id);
+    assert.equal((await a.command('activity', {activity:id})).ok, true);
+    await waitFor(() => guide.state().active === true, 'guide active ' + id);
+    for (const other of [p,q,r,unknown]) neutral(other, 'guide excludes other activities');
+    assert.equal((await a.command('correction', {enabled:true})).error, 'correction_unavailable');
+    assert.equal((await correction(id)).status,404);
+    assert.equal((await a.command('activity', {activity:null})).ok,true);
+    await waitFor(() => guide.state().active === false, 'guide stopped');
+    guide.socket.close();
+    await pause(250); // Stay below the real command rate limit.
+  }
+  await waitFor(() => a.state().totalViewers === 4, 'guide test cleanup');
   const tools = { ...a.state().tools, message: 'MESSAGE RÉSERVÉ AU COURS',
     notice: { text: 'CONSIGNE PRIVÉE', until: Date.now() + 60000 }, timer: { state: 'running', until: Date.now() + 120000 } };
   await a.command('tools', { tools });

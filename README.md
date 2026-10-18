@@ -79,3 +79,7 @@ Relancer cette préparation puis publier le relais après une modification des c
 `server/relay/correction-assets/` reste exclu de Git et de GitHub Pages. Seul `server/relay/src/corrections-catalog.js` est versionné. Le relais sert ces PDF par son binding interne : les chemins bruts restent fermés, et `/correction?activity=…` exige une diffusion autorisée pour l’activité choisie avec au moins un appareil professeur actif. Les réponses sont envoyées sans mise en cache. Conserver `assets.run_worker_first: true` dans la configuration du relais pour protéger tous les chemins des fichiers.
 
 La préparation actualise aussi `public/activities.js`, qui contient uniquement les identifiants et titres des activités pour le sélecteur professeur. Pour régénérer cette liste depuis le catalogue existant sans recopier les PDF, lancer `node server/relay/scripts/write-activities.mjs`.
+
+## Ouvrir une séance depuis son dossier
+
+Les liens `?activity=projets/5&seance=2` (ou `exposes/5`, ou une activité telle que `5/07`) préparent le cours demandé. Après connexion professeur, le pilote sélectionne cette activité, active sa liaison et ouvre sa page. Un appareil suiveur doit prendre la main ; le lien ne change jamais ses droits. Les guides de groupes proposent seulement des consignes, aides et simulations ; aucune réponse élève n’y est saisie ou enregistrée. Les guides n’ont pas de corrigé à diffuser.

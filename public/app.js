@@ -484,6 +484,16 @@ function setRemoteNoise(noise, preferences, options = {}) {
   showAlarm(remoteNoise?.alarm ?? false, false);
 }
 window.ClasseCalmeDisplay = {
+  openActivity(id, title, session) {
+    if (!canEditDisplay()) return false;
+    const allowed = window.ClasseCalmeActivities?.some(item => item.id === id);
+    if (!allowed) return false;
+    const url = new URL('https://jean-marie-cardoso.github.io/labo-techno/' + id + '/');
+    if (/^(projets|exposes)\/[345]$/.test(id)) url.hash = 'seance-' + session;
+    const old = documents.find(doc => doc.kind === 'web' && doc.url === url.href);
+    if (old) selectTab(old.id); else addDocument('web', title, url.href);
+    return true;
+  },
   getState: getDisplayState,
   getFile: fileId => documents.find(doc => doc.fileId === fileId)?.originalBlob ?? null,
   applyState: applyDisplayState,

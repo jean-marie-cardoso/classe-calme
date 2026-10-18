@@ -1,5 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import { CORRECTIONS } from './corrections-catalog.js';
+const GUIDE_ACTIVITIES = Object.freeze({"projets/5": "5e · Projet maison 3D et réseau", "projets/4": "4e · Projet Pong à deux et réseau", "projets/3": "3e · Projet objet 3D", "exposes/5": "5e · Exposé : un objet du quotidien", "exposes/4": "4e · Exposé : une technologie du téléphone", "exposes/3": "3e · Exposé : fabriquer ou réparer"});
+function knownActivity(id) { return typeof id === "string" && (Object.hasOwn(CORRECTIONS, id) || Object.hasOwn(GUIDE_ACTIVITIES, id)); }
+
 const TTL = 35000;
 const PRESENCE_WRITE_INTERVAL = 10000;
 const MESSAGE = 'MOINS DE BRUIT, MERCI.';
@@ -356,7 +359,7 @@ export class ClassroomRelay extends DurableObject {
     return row ? JSON.parse(row.value) : null;
   }
   targetActivity(room = this.remote()) {
-    return typeof room?.targetActivity === 'string' && Object.hasOwn(CORRECTIONS, room.targetActivity) ? room.targetActivity : null;
+    return knownActivity(room?.targetActivity) ? room.targetActivity : null;
   }
   pupilState(activity, now = Date.now()) {
     const room = this.remote();
@@ -741,7 +744,7 @@ export class ClassroomRelay extends DurableObject {
         room.linkActivities = body.enabled;
         if (!body.enabled) room.correction = false;
       } else if (body.action === 'activity') {
-        if (body.activity !== null && (typeof body.activity !== 'string' || !Object.hasOwn(CORRECTIONS, body.activity))) throw new Error('invalid_activity');
+        if (body.activity !== null && !knownActivity(body.activity)) throw new Error('invalid_activity');
         if (body.activity !== this.targetActivity(room)) {
           room.correction = false;
           room.tools.notice = null;
@@ -752,6 +755,7 @@ export class ClassroomRelay extends DurableObject {
         if (typeof body.enabled !== 'boolean') throw new Error('invalid_correction');
         if (body.enabled && !room.linkActivities) throw new Error('activities_disabled');
         if (body.enabled && !this.targetActivity(room)) throw new Error('activity_required');
+        if (body.enabled && !Object.hasOwn(CORRECTIONS, this.targetActivity(room))) throw new Error('correction_unavailable');
         room.correction = body.enabled;
       } else if (body.action === 'microphone') {
         if (typeof body.enabled !== 'boolean') throw new Error('invalid_microphone');

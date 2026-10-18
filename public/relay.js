@@ -36,6 +36,47 @@
   let correctionBusy = false, correctionAttempt = 0, correctionError = '';
   let activityBusy = false, activityAttempt = 0, activityError = '', requestedActivity = null;
 
+
+  const launchParams = new URL(window.location?.href || 'https://jean-marie-cardoso.github.io/classe-calme/').searchParams;
+  const launchId = launchParams.get('activity');
+  const launchItem = activities.get(launchId);
+  const launchMax = launchId?.startsWith('exposes/') ? 4 : 7;
+  const launchSession = Math.max(1, Math.min(launchMax, Number(launchParams.get('seance')) || 1));
+  let launchBusy = false, launchDone = false, launchFailed = false;
+  let launchBox = null, launchText = null, launchButton = null;
+  if (launchItem) {
+    launchBox = document.createElement('section'); launchBox.id = 'courseLaunch';
+    launchBox.style.cssText = 'position:fixed;top:70px;left:20px;right:20px;z-index:150;background:#fff;padding:18px;border:2px solid #176c62;border-radius:12px;color:#203c38';
+    launchText = document.createElement('p'); launchButton = document.createElement('button');
+    launchButton.textContent = 'Ouvrir la séance';
+    launchButton.onclick = () => { launchFailed = false; if (!auth.getGrant()) auth.connect(); else if (!isController()) requestControl(); else void launchCourse(); };
+    launchBox.append(launchText, launchButton); document.body.append(launchBox);
+  }
+  async function launchCourse() {
+    if (!launchItem || launchBusy || launchDone || !isController()) return;
+    launchBusy = true; renderLaunch();
+    try {
+      await selectActivity(launchId);
+      if (targetActivity() !== launchId || !isController()) throw new Error('activity');
+      if (!room.linkActivities) await command('link', { enabled: true });
+      // Finish any mirror update before opening the requested lesson.
+      const deadline = Date.now() + 15000;
+      while (displayApplyBusy && isReady() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+      if (displayApplyBusy || !isReady()) throw new Error('display_busy');
+      await applyRemoteDisplay();
+      if (!isController() || !display.openActivity(launchId, launchItem.title, Math.floor(launchSession))) throw new Error('display');
+      launchDone = true;
+      launchBox.hidden = true;
+    } catch { launchFailed = true; }
+    finally { launchBusy = false; renderLaunch(); }
+  }
+  function renderLaunch() {
+    if (!launchBox || launchDone) return;
+    launchText.textContent = launchItem.title + ' — ' + (launchFailed ? 'Ouverture interrompue. Réessaie.' : launchBusy ? 'Ouverture…' : !auth.getGrant() ? 'Connecte-toi comme professeur pour ouvrir cette séance et relier les activités.' : !isReady() ? 'Connexion…' : !isController() ? 'Prends la main pour ouvrir cette séance.' : 'Ouverture de la séance…');
+    launchButton.disabled = launchBusy;
+    if (!launchBusy && !launchFailed && isController()) void launchCourse();
+  }
+
   const control = document.createElement('button');
   control.id = 'remoteControl';
   control.type = 'button';
@@ -66,11 +107,11 @@
     emptyOption.value = '';
     emptyOption.textContent = 'Choisir une activité…';
     activitySelect.append(emptyOption);
-    for (const group of ['5', '4', '3', 'bonus']) {
-      const choices = [...activities.values()].filter(item => group === 'bonus' ? item.id.startsWith('bonus/') : item.id.startsWith(group + '/'));
+    for (const group of ['5', '4', '3', 'bonus', 'projets', 'exposes']) {
+      const choices = [...activities.values()].filter(item => item.id.startsWith(group + '/'));
       if (!choices.length) continue;
       const optionGroup = document.createElement('optgroup');
-      optionGroup.label = group === 'bonus' ? 'Bonus' : group + 'e';
+      optionGroup.label = group === 'bonus' ? 'Outils des projets' : group === 'projets' ? 'Projets · séances' : group === 'exposes' ? 'Exposés · séances' : group + 'e';
       for (const item of choices.sort((a, b) => a.id.localeCompare(b.id))) {
         const option = document.createElement('option');
         option.value = item.id;
@@ -122,7 +163,9 @@
     const sequence = /^([345])\/(\d{2})$/.exec(id);
     if (sequence) return sequence[1] + 'e S' + sequence[2];
     const bonus = /^bonus\/([345])-(\d{2})$/.exec(id);
-    return bonus ? 'Bonus ' + bonus[1] + 'e ' + bonus[2] : 'Activité';
+    if (bonus) return 'Projet ' + bonus[1] + 'e · outil ' + bonus[2];
+    const guide = /^(projets|exposes)\/([345])$/.exec(id);
+    return guide ? (guide[1] === 'projets' ? 'Projet ' : 'Exposé ') + guide[2] + 'e' : 'Activité';
   }
   function activityName(id) {
     if (activities.has(id)) return activities.get(id).title;
@@ -182,8 +225,8 @@
     const enabled = ready && room.correction === true;
     correctionButton.textContent = enabled ? 'Masquer la correction' : 'Afficher la correction';
     correctionButton.setAttribute('aria-pressed', String(enabled));
-    correctionButton.disabled = correctionBusy || activityBusy || takingControl || !targetActivity() || (ready ? !room.linkActivities : !checkbox.checked);
-    correctionButton.title = !targetActivity() ? 'Choisis l’activité du cours.' : (ready ? room.linkActivities : checkbox.checked) ? '' : 'Active « Lier mes activités ».';
+    correctionButton.disabled = correctionBusy || activityBusy || takingControl || !targetActivity() || activities.get(targetActivity())?.correction === false || (ready ? !room.linkActivities : !checkbox.checked);
+    correctionButton.title = activities.get(targetActivity())?.correction === false ? 'Ce guide ne contient pas de corrigé à diffuser.' : !targetActivity() ? 'Choisis l’activité du cours.' : (ready ? room.linkActivities : checkbox.checked) ? '' : 'Active « Lier mes activités ».';
     correctionFeedback.textContent = correctionError || (correctionBusy ? 'Envoi…' : auth.getGrant() && !ready ? 'Connexion…' : '');
     correctionFeedback.hidden = !correctionFeedback.textContent;
   }
@@ -217,6 +260,7 @@
     if (!byId('activitySummary')?.hidden) renderConnections();
     renderActivity();
     renderCorrection();
+    renderLaunch();
   }
   function setFollowing(value) {
     display.setFollowing(value);
