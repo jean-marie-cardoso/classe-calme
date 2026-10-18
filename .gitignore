@@ -4,3 +4,4 @@ node_modules/
 .wrangler/
 build/
 *.tar.gz
+/server/relay/correction-assets/

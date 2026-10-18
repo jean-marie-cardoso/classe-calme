@@ -23,7 +23,7 @@ Les onglets PDF et web, la page et le zoom du PDF, le minuteur, les consignes et
 
 Un site intégré reste utilisable directement sur le PC. Les clics et défilements à l’intérieur d’un site ne sont pas reproduits sur les autres écrans. Certains sites refusent l’affichage intégré : **Ouvrir à part** permet de les ouvrir dans un autre onglet, hors de la projection synchronisée.
 
-Les documents privés sont réservés aux appareils connectés avec le mot de passe. Les pages élèves ne les reçoivent pas. Les PDF partagés sont limités à 15 Mio par fichier, avec un stockage temporaire de 60 Mio par salle. Sans connexion professeur, la projection locale reste utilisable.
+Les PDF chargés pour la projection sont réservés aux appareils connectés avec le mot de passe. Les pages élèves ne les reçoivent pas. Ces PDF sont limités à 15 Mio par fichier, avec un stockage temporaire de 60 Mio par salle. Sans connexion professeur, la projection locale reste utilisable.
 
 ## Activités des élèves
 
@@ -35,6 +35,14 @@ Les liens d’activité habituels ne changent pas. La liaison est commune à tou
 
 Dans la version personnelle, le minuteur, les consignes et le texte de l’alerte sont aussi envoyés aux activités. Le minuteur apparaît dans un coin et suit les pauses, reprises et remises à zéro du professeur. Cliquer sur le nombre de connexions affiche leur répartition par activité. Il s’agit de pages ouvertes, pas de personnes : plusieurs onglets peuvent compter plusieurs fois. Ce détail reste réservé au professeur. La version à partager affiche les outils uniquement sur la projection.
 
+### Diffuser la correction
+
+Dans la version personnelle, ouvrir **Outils → Correction → Afficher la correction**. Il faut être connecté comme professeur, piloter les écrans et avoir activé **Lier mes activités**. Le bouton suit le même état sur les appareils professeur.
+
+Chaque activité affiche son propre PDF **Corrigé élève**, au-dessus de la page. Chaque élève peut changer de page et régler le zoom indépendamment. **Retour à l’activité** permet de reprendre l’exercice ; **Revoir la correction** rouvre le document tant que le professeur le laisse disponible. Le document projeté par le professeur reste inchangé.
+
+**Masquer la correction** retire le lecteur et bloque les nouvelles lectures du PDF. Désactiver la liaison aux activités ou déconnecter le dernier appareil professeur coupe aussi cet accès ; en cas de perte réseau, il expire sous 35 secondes. Une copie déjà reçue ne peut pas être effacée à distance. Cette fonction est absente de la version à partager.
+
 ## Sources et publication
 
 - `public/` : page GitHub Pages, publiée automatiquement depuis `main`.
@@ -44,4 +52,18 @@ Aucun secret n’est présent dans ce dépôt. Les valeurs privées restent dans
 
 Le relais utilise deux secrets Cloudflare : `TEACHER_PASSWORD_HASH` (empreinte PBKDF2-SHA-256 salée, format `pbkdf2-sha256:100000:<sel hex32>:<empreinte hex64>`) et `TEACHER_AUTH_SECRET` (clé aléatoire de signature d’au moins 32 caractères). Le mot de passe n’est pas enregistré dans le navigateur. Les tentatives de connexion sont limitées et les sessions sont révocables côté serveur. Pour révoquer toutes les autorisations lors d’un changement de mot de passe, renouveler aussi la clé de signature.
 
-La synchronisation des appareils utilise une connexion professeur distincte des pages élèves. Le pilote de l’affichage et la source du micro ont chacun leur propre droit temporaire. Le transfert des PDF est authentifié et fractionné ; les fichiers ne sont jamais publiés dans GitHub ni transmis par les connexions élèves.
+La synchronisation des appareils utilise une connexion professeur distincte des pages élèves. Le pilote de l’affichage et la source du micro ont chacun leur propre droit temporaire. Le transfert des PDF de projection est authentifié et fractionné ; ces fichiers ne sont jamais publiés dans GitHub ni transmis par les connexions élèves.
+
+### Préparer les corrigés privés
+
+Les corrigés sont préparés depuis les PDF `02_Corrige_eleve_Pronote_…` du dossier des cours. Le catalogue associe chaque activité à sa correction exacte ; il contient uniquement les titres, chemins internes, tailles et empreintes des fichiers.
+
+Depuis la racine de ce dépôt, définir `COURSE_ROOT` avec le dossier local des cours et `CORRECTIONS_MANIFEST` avec le fichier `links.json` du dépôt `jmtechno`, puis lancer :
+
+```sh
+node server/relay/scripts/prepare-corrections.mjs "$COURSE_ROOT" "$CORRECTIONS_MANIFEST"
+```
+
+Relancer cette préparation puis publier le relais après une modification des corrigés. Le script vérifie toutes les correspondances avant de remplacer les fichiers préparés. Il refuse les PDF invalides, les fichiers supérieurs à 15 Mio et un ensemble supérieur à 60 Mio.
+
+`server/relay/correction-assets/` reste exclu de Git et de GitHub Pages. Seul `server/relay/src/corrections-catalog.js` est versionné. Le relais sert ces PDF par son binding interne : les chemins bruts restent fermés, et `/correction?activity=…` exige une diffusion autorisée avec au moins un appareil professeur actif. Les réponses sont envoyées sans mise en cache. Conserver `assets.run_worker_first: true` dans la configuration du relais pour protéger tous les chemins des fichiers.

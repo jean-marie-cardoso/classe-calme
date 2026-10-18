@@ -27,6 +27,7 @@
   let noiseTimer = null, lastNoiseSent = 0, micOwned = false;
   let takingControl = false, errorMessage = '';
   let controllerLocalDisplay = false, controllerLocalTools = false;
+  let correctionBusy = false, correctionAttempt = 0, correctionError = '';
 
   const control = document.createElement('button');
   control.id = 'remoteControl';
@@ -40,6 +41,29 @@
   microphoneSource.id = 'microphoneSource';
   microphoneSource.setAttribute('role', 'status');
   status.before(remoteStatus, microphoneSource);
+  let correctionButton = null, correctionFeedback = null;
+  const toolsPanel = byId('toolsPopup');
+  if (checkbox && toolsPanel) {
+    const section = document.createElement('section');
+    section.className = 'tool-section';
+    section.setAttribute('aria-labelledby', 'correctionHeading');
+    const heading = document.createElement('h3');
+    heading.id = 'correctionHeading';
+    heading.textContent = 'Correction';
+    correctionButton = document.createElement('button');
+    correctionButton.id = 'toggleCorrection';
+    correctionButton.type = 'button';
+    correctionButton.setAttribute('aria-pressed', 'false');
+    correctionButton.setAttribute('aria-describedby', 'correctionFeedback');
+    correctionFeedback = document.createElement('p');
+    correctionFeedback.id = 'correctionFeedback';
+    correctionFeedback.className = 'hint';
+    correctionFeedback.setAttribute('role', 'status');
+    correctionFeedback.hidden = true;
+    section.append(heading, correctionButton, correctionFeedback);
+    toolsPanel.insertBefore(section, toolsPanel.querySelector('.alarm-message-tools'));
+    correctionButton.addEventListener('click', () => { void toggleCorrection(); });
+  }
 
   function endpoint(path, extra = {}) {
     const url = new URL(path, relayOrigin);
@@ -91,6 +115,17 @@
   document.addEventListener('keydown', event => { if (event.key === 'Escape') showConnections(false); });
 
   function setError(text) { errorMessage = text; renderStatus(); }
+  function renderCorrection() {
+    if (!correctionButton) return;
+    const ready = isReady();
+    const enabled = ready && room.correction === true;
+    correctionButton.textContent = enabled ? 'Masquer la correction' : 'Afficher la correction';
+    correctionButton.setAttribute('aria-pressed', String(enabled));
+    correctionButton.disabled = correctionBusy || takingControl || (ready ? !room.linkActivities : !checkbox.checked);
+    correctionButton.title = (ready ? room.linkActivities : checkbox.checked) ? '' : 'Active « Lier mes activités ».';
+    correctionFeedback.textContent = correctionError || (correctionBusy ? 'Envoi…' : auth.getGrant() && !ready ? 'Connexion…' : '');
+    correctionFeedback.hidden = !correctionFeedback.textContent;
+  }
   function renderStatus() {
     const ready = isReady(), controlling = isController();
     control.textContent = controlling ? 'Télécommande' : 'Prendre la main';
@@ -117,6 +152,7 @@
     } else showConnections(false);
     activityStats = counted && Array.isArray(room.activities) ? room.activities.filter(item => item && typeof item.id === 'string' && item.id.length <= 40 && Number.isInteger(item.count) && item.count > 0).slice(0, 100) : [];
     if (!byId('activitySummary')?.hidden) renderConnections();
+    renderCorrection();
   }
   function setFollowing(value) {
     display.setFollowing(value);
@@ -127,6 +163,7 @@
     else byId('calibrate').disabled = !display.getMicrophoneState();
   }
   function requestControl() {
+    if (document.activeElement === correctionButton) correctionError = 'Clique sur « Prendre la main ».';
     setError('Clique sur « Prendre la main ».');
     control.focus();
   }
@@ -156,6 +193,35 @@
       waiter.timer = setTimeout(() => { roomWaiters.delete(waiter); reject(new Error('timeout')); }, 4000);
       roomWaiters.add(waiter);
     });
+  }
+  async function toggleCorrection() {
+    if (correctionBusy) return;
+    correctionError = '';
+    if (!auth.getGrant()) { auth.connect(); return; }
+    if (!isReady()) { connect(); renderCorrection(); return; }
+    if (!isController()) {
+      correctionError = 'Clique sur « Prendre la main ».';
+      requestControl();
+      return;
+    }
+    if (!room.linkActivities) { renderCorrection(); return; }
+    const enabled = room.correction !== true;
+    const currentGeneration = generation;
+    const attempt = ++correctionAttempt;
+    correctionBusy = true;
+    renderCorrection();
+    try {
+      await command('correction', { enabled });
+      if (generation !== currentGeneration || attempt !== correctionAttempt) return;
+      await waitForRoom(() => isReady() && room.correction === enabled);
+    } catch {
+      if (generation === currentGeneration && attempt === correctionAttempt) correctionError = 'Correction non envoyée. Réessaie.';
+    } finally {
+      if (generation === currentGeneration && attempt === correctionAttempt) {
+        correctionBusy = false;
+        renderCorrection();
+      }
+    }
   }
   async function authorizedFetch(path, options = {}, extra = {}, bodyType = 'json') {
     const grant = auth.getGrant();
@@ -320,6 +386,7 @@
   function acceptRoom(value) {
     if (!value || value.type !== 'remote' || value.v !== 1 || !Number.isFinite(value.revision) || value.revision < highestRevision || !value.display || !value.tools || !Array.isArray(value.devices)) return;
     const wasController = isController();
+    const correctionChanged = room?.correction !== value.correction;
     const firstSnapshot = !received;
     highestRevision = value.revision;
     room = value;
@@ -331,6 +398,9 @@
     for (const fileId of downloaded.keys()) if (!referencedFiles.has(fileId)) downloaded.delete(fileId);
     const controlling = isController();
     if (wasController && !controlling) {
+      correctionAttempt++;
+      correctionBusy = false;
+      correctionError = '';
       transferController.abort();
       transferController = new AbortController();
       displaySent = displayVersion;
@@ -338,6 +408,7 @@
       controllerLocalDisplay = controllerLocalTools = false;
       errorMessage = '';
     }
+    if (correctionChanged || (!wasController && controlling)) correctionError = '';
     setFollowing(!controlling);
     if (!controlling && (firstSnapshot || wasController)) window.updateProjection?.(true);
     const localState = display.getState();
@@ -361,6 +432,9 @@
   function resetConnection() {
     const hadRemoteMic = micOwned || micClaimPending || room?.microphone?.deviceId === deviceId;
     received = false;
+    correctionAttempt++;
+    correctionBusy = false;
+    correctionError = '';
     clearInterval(pingTimer); pingTimer = null;
     clearTimeout(toolTimer); toolTimer = null;
     clearTimeout(noiseTimer); noiseTimer = null;
@@ -523,6 +597,8 @@
   checkbox.addEventListener('change', () => {
     try { localStorage.setItem(storageKey, String(checkbox.checked)); } catch {}
     if (isController()) void command('link', { enabled: checkbox.checked }).catch(() => setError('Modification non envoyée.'));
+    correctionError = '';
+    renderCorrection();
   });
   connectButton.addEventListener('click', () => { auth.connect(); });
   document.addEventListener('classe-calme:auth-changed', () => {

@@ -1,4 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
+import { CORRECTIONS } from './corrections-catalog.js';
 const TTL = 35000;
 const MESSAGE = 'MOINS DE BRUIT, MERCI.';
 const NOTICE_MAX_LIFETIME = 180000;
@@ -105,7 +106,7 @@ function defaultRoom(now) {
   return { revision: 0, expiresAt: now + TTL, controller: null, microphone: null,
     display: { documents: [], activeId: null },
     tools: { message: MESSAGE, notice: null, timer: null, preferences: { threshold: 12, delay: 3, mode: 'cover', pulse: true } },
-    noise: { level: 0, alarm: false }, noiseAt: 0, testUntil: 0, pauseUntil: 0, linkActivities: true };
+    noise: { level: 0, alarm: false }, noiseAt: 0, testUntil: 0, pauseUntil: 0, linkActivities: true, correction: false };
 }
 function cleanTools(input, now) {
   if (!input || !plainText(input.message, 120)) throw new Error('invalid_message');
@@ -161,7 +162,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true });
-    if (!['/live', '/teacher', '/files', '/login', '/logout', '/publish', '/release'].includes(url.pathname)) return json({ error: 'not_found' }, 404);
+    if (!['/live', '/teacher', '/files', '/correction', '/login', '/logout', '/publish', '/release'].includes(url.pathname)) return json({ error: 'not_found' }, 404);
     const origin = request.headers.get('origin');
     const reply = response => cors(response, origin, env.STUDENT_ORIGIN);
     const channel = channelName(url);
@@ -172,8 +173,8 @@ export default {
     } else {
       if (origin && origin !== env.STUDENT_ORIGIN) return json({ error: 'origin' }, 403);
       if (request.method === 'OPTIONS') return reply(new Response(null, { status: 204 }));
-      if (request.method !== 'POST' && !(url.pathname === '/files' && request.method === 'GET')) return reply(json({ error: 'method' }, 405));
-      if (!authConfig(env)) return reply(json({ error: 'auth_unavailable' }, 503));
+      if (url.pathname === '/correction' ? request.method !== 'GET' : request.method !== 'POST' && !(url.pathname === '/files' && request.method === 'GET')) return reply(json({ error: 'method' }, 405));
+      if (url.pathname !== '/correction' && !authConfig(env)) return reply(json({ error: 'auth_unavailable' }, 503));
     }
     try {
       if (url.pathname === '/login') {
@@ -183,7 +184,7 @@ export default {
         return reply(json(result.body, result.status, result.retryAfter ? { 'retry-after': String(result.retryAfter) } : {}));
       }
       let payload;
-      if (url.pathname !== '/live') {
+      if (url.pathname !== '/live' && url.pathname !== '/correction') {
         let token = (request.headers.get('authorization') || '').replace(/^Bearer /, '');
         if (url.pathname === '/teacher') {
           if (!authConfig(env)) return reply(json({ error: 'auth_unavailable' }, 503));
@@ -296,7 +297,7 @@ export class ClassroomRelay extends DurableObject {
       const timerRemaining = Math.max(0, Math.min(TIMER_MAX_LIFETIME, timer.until - now));
       timer = { state: timerRemaining > 0 ? 'running' : 'finished', remainingMs: timerRemaining };
     }
-    return { type: 'state', v: 1, active, alarm: Boolean(active && state.alarm), mode: state?.mode || 'cover', pulse: state?.pulse ?? false, message: state?.message || MESSAGE, notice, timer, remainingMs };
+    return { type: 'state', v: 1, active, alarm: Boolean(active && state.alarm), mode: state?.mode || 'cover', pulse: state?.pulse ?? false, message: state?.message || MESSAGE, notice, timer, correction: Boolean(active && state.correction), remainingMs };
   }
   teacherStats(active) {
     const sockets = this.ctx.getWebSockets().filter(socket => this.attachment(socket)?.role !== 'teacher' && socket.readyState === 1);
@@ -342,7 +343,7 @@ export class ClassroomRelay extends DurableObject {
     if (room) {
       if (room.controller?.deviceId === deviceId) room.controller = null;
       if (room.microphone?.deviceId === deviceId) { room.microphone = null; room.noise = { level: 0, alarm: false }; room.noiseAt = 0; }
-      if (!this.devices(now).length) room.expiresAt = now + TTL;
+      if (!this.devices(now).length) { room.expiresAt = now + TTL; room.correction = false; }
       this.saveRoom(room);
     }
     return true;
@@ -402,7 +403,7 @@ export class ClassroomRelay extends DurableObject {
     const active = Boolean(room.linkActivities && devices.length);
     return this.publicState({ expiresAt: active ? Math.max(...devices.map(device => device.expiresAt)) : 0,
       alarm: this.effectiveNoise(room, now).alarm, mode: preferences.mode, pulse: preferences.pulse,
-      message: room.tools.message, notice: room.tools.notice, timer: room.tools.timer }, now);
+      message: room.tools.message, notice: room.tools.notice, timer: room.tools.timer, correction: room.correction }, now);
   }
   snapshot(now = Date.now()) {
     const room = this.remote();
@@ -411,7 +412,7 @@ export class ClassroomRelay extends DurableObject {
     return { type: 'remote', v: 1, revision: room.revision, serverNow: now,
       controller: room.controller, microphone: room.microphone,
       devices: this.devices(now).map(device => ({ deviceId: device.deviceId, label: device.label })),
-      display: room.display, tools: room.tools, noise: this.effectiveNoise(room, now), linkActivities: room.linkActivities,
+      display: room.display, tools: room.tools, noise: this.effectiveNoise(room, now), linkActivities: room.linkActivities, correction: Boolean(room.correction),
       viewers: stats.viewers, activities: stats.activities };
   }
   effectiveNoise(room, now = Date.now()) {
@@ -524,10 +525,36 @@ export class ClassroomRelay extends DurableObject {
     await this.scheduleAlarm();
     return json({ ok: true, complete, size });
   }
+  async correctionRequest(request) {
+    const now = Date.now();
+    if (this.cleanupRemote(now)) this.broadcastRemote();
+    const activity = new URL(request.url).searchParams.get('activity');
+    if (!activity || !Object.hasOwn(CORRECTIONS, activity)) return json({ error: 'not_found' }, 404);
+    const allowed = () => this.remotePublicState()?.correction === true;
+    if (!allowed()) return json({ error: 'correction_hidden' }, 403);
+    if (!this.env.CORRECTIONS) return json({ error: 'temporarily_unavailable' }, 503);
+    const entry = CORRECTIONS[activity];
+    // Les fichiers restent dans le binding interne, jamais dans GitHub Pages.
+    const asset = await this.env.CORRECTIONS.fetch(new Request(new URL(entry.file, 'https://corrections.internal/')));
+    if (asset.status !== 200) {
+      if (asset.body) await asset.body.cancel();
+      return json({ error: 'temporarily_unavailable' }, 503);
+    }
+    // Une fermeture arrivée pendant la lecture du fichier garde la priorité.
+    if (!allowed()) {
+      if (asset.body) await asset.body.cancel();
+      return json({ error: 'correction_hidden' }, 403);
+    }
+    return new Response(asset.body, { headers: {
+      'content-type': 'application/pdf', 'content-disposition': 'inline',
+      'cache-control': 'private, no-store, max-age=0', 'x-content-type-options': 'nosniff'
+    } });
+  }
   async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === '/teacher') return this.teacherConnect(request);
     if (path === '/files') return this.fileRequest(request);
+    if (path === '/correction') return this.correctionRequest(request);
     return this.legacyFetch(request);
   }
   async legacyFetch(request) {
@@ -645,7 +672,7 @@ export class ClassroomRelay extends DurableObject {
     let error = null;
     let broadcast = true;
     try {
-      if (['display', 'tools', 'link', 'test-alert', 'pause-alert'].includes(body.action) && room.controller?.deviceId !== info.deviceId) throw new Error('controller_required');
+      if (['display', 'tools', 'link', 'correction', 'test-alert', 'pause-alert'].includes(body.action) && room.controller?.deviceId !== info.deviceId) throw new Error('controller_required');
       if (body.action === 'take-control') room.controller = { deviceId: info.deviceId, label: info.label };
       else if (body.action === 'display') {
         room.display = cleanDisplay(body.display, id => Boolean(this.file(id)?.complete && this.file(id).expiresAt > now));
@@ -655,6 +682,11 @@ export class ClassroomRelay extends DurableObject {
       else if (body.action === 'link') {
         if (typeof body.enabled !== 'boolean') throw new Error('invalid_link');
         room.linkActivities = body.enabled;
+        if (!body.enabled) room.correction = false;
+      } else if (body.action === 'correction') {
+        if (typeof body.enabled !== 'boolean') throw new Error('invalid_correction');
+        if (body.enabled && !room.linkActivities) throw new Error('activities_disabled');
+        room.correction = body.enabled;
       } else if (body.action === 'microphone') {
         if (typeof body.enabled !== 'boolean') throw new Error('invalid_microphone');
         if (body.enabled) {

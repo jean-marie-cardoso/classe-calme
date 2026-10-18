@@ -4,6 +4,7 @@
   "description": "Relais lecture seule des alertes Classe calme vers Le labo techno",
   "main": "index.js",
   "scripts": {
+    "test": "node tests/corrections.cjs",
     "dev": "wrangler dev",
     "check": "wrangler deploy --dry-run --outdir build"
   },
