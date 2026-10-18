@@ -336,6 +336,7 @@ async function stop() {
   sampledAlarm = false;
   showAlarm(false);
   document.body.classList.remove('listening');
+  document.querySelector('.meter').hidden = Boolean(remoteNoise);
   $('mic').textContent = 'Activer micro';
   $('mic').setAttribute('aria-pressed', 'false');
   $('status').textContent = $('badgeText').textContent = 'Micro arrêté';
@@ -382,6 +383,7 @@ async function microphone() {
       notify('Micro déconnecté. Rebranchez-le puis réactivez.');
     };
     document.body.classList.add('listening');
+    document.querySelector('.meter').hidden = false;
     sampledAlarm = false;
     $('mic').setAttribute('aria-pressed', 'true');
     $('calibrate').disabled = $('pause').disabled = false;
@@ -469,16 +471,15 @@ function setRemoteNoise(noise, preferences, options = {}) {
     if (['cover', 'border'].includes(preferences.mode)) $('mode').value = preferences.mode;
     if (typeof preferences.pulse === 'boolean') $('pulse').checked = preferences.pulse;
   }
-  remoteNoise = noise && { ...noise, level: clamp(Number(noise.level) || 0, 0, 100), alarm: noise.alarm === true };
+  remoteNoise = noise && { ...noise, alarm: noise.alarm === true };
+  document.querySelector('.meter').hidden = Boolean(remoteNoise && !stream);
   const serverNow = Number.isFinite(options.serverNow) ? options.serverNow : Date.now();
   remotePauseUntil = remoteNoise?.pausedUntil > serverNow ? performance.now() + Math.min(60000, remoteNoise.pausedUntil - serverNow) : 0;
   remoteTestUntil = remoteNoise?.testUntil > serverNow ? performance.now() + Math.min(10000, remoteNoise.testUntil - serverNow) : 0;
   if (stream) { applyRemoteOverrides(); return; }
-  level = remoteNoise?.level ?? 0;
+  level = 0;
   $('level').style.width = level + '%';
   document.querySelector('.meter').setAttribute('aria-valuenow', Math.round(level));
-  const threshold = +$('threshold').value;
-  $('level').style.background = level >= threshold ? '#cf3e32' : level >= threshold - 10 ? '#d69c30' : '#73a759';
   $('badgeText').textContent = remoteNoise ? (remoteNoise.alarm ? 'Bruit élevé' : 'Micro connecté') : 'Micro arrêté';
   showAlarm(remoteNoise?.alarm ?? false, false);
 }

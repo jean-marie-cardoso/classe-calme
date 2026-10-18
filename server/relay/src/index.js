@@ -1,6 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { CORRECTIONS } from './corrections-catalog.js';
 const TTL = 35000;
+const PRESENCE_WRITE_INTERVAL = 10000;
 const MESSAGE = 'MOINS DE BRUIT, MERCI.';
 const NOTICE_MAX_LIFETIME = 180000;
 const TIMER_MAX_LIFETIME = 180 * 60000;
@@ -225,6 +226,8 @@ export default {
 export class ClassroomRelay extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
+    this.tableCache = new Map();
+    this.alarmUpdate = Promise.resolve();
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS closed (sessionId TEXT PRIMARY KEY, expiresAt INTEGER NOT NULL)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS revoked (nonce TEXT PRIMARY KEY, expiresAt INTEGER NOT NULL)');
@@ -235,21 +238,46 @@ export class ClassroomRelay extends DurableObject {
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS remote_files (id TEXT PRIMARY KEY, parts INTEGER NOT NULL, size INTEGER NOT NULL, complete INTEGER NOT NULL, expiresAt INTEGER NOT NULL, orphanUntil INTEGER)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS remote_chunks (fileId TEXT NOT NULL, part INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(fileId,part))');
   }
+  sql(statement, ...bindings) {
+    const result = this.ctx.storage.sql.exec(statement, ...bindings);
+    const mutation = /^(?:INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM) ([a-z_]+)/i.exec(statement);
+    if (mutation) this.tableCache.delete(mutation[1]);
+    return result;
+  }
+  tableRows(table) {
+    if (!['state', 'remote_room', 'remote_devices', 'remote_files', 'revoked'].includes(table)) throw new Error('invalid_table');
+    if (!this.tableCache.has(table)) this.tableCache.set(table, this.ctx.storage.sql.exec(`SELECT * FROM ${table}`).toArray());
+    return this.tableCache.get(table);
+  }
+  revoked(nonce, now = Date.now()) {
+    return this.tableRows('revoked').some(row => row.nonce === nonce && row.expiresAt > now);
+  }
+  deviceRows() { return this.tableRows('remote_devices'); }
+  deviceExpiry(row) {
+    let expiresAt = row.expiresAt;
+    for (const socket of this.ctx.getWebSockets()) {
+      const info = this.attachment(socket);
+      if (info?.role === 'teacher' && info.deviceId === row.deviceId && info.connectionId === row.connectionId && info.authNonce === row.nonce && Number.isSafeInteger(info.lastSeenAt)) {
+        expiresAt = Math.max(expiresAt, info.lastSeenAt + TTL);
+      }
+    }
+    return Math.min(expiresAt, row.authExpires);
+  }
   async login(password, ipHash, channel) {
     const config = authConfig(this.env);
     if (!config) return { status: 503, body: { error: 'auth_unavailable' } };
     const now = Date.now();
-    this.ctx.storage.sql.exec('DELETE FROM auth_attempts WHERE attemptedAt<=?', now - LOGIN_WINDOW);
-    this.ctx.storage.sql.exec('DELETE FROM auth_sessions WHERE expiresAt<=?', now);
-    const global = this.ctx.storage.sql.exec('SELECT COUNT(*) AS count, MIN(attemptedAt) AS oldest FROM auth_attempts').one();
-    const personal = this.ctx.storage.sql.exec('SELECT COUNT(*) AS count, MIN(attemptedAt) AS oldest FROM auth_attempts WHERE ipHash=?', ipHash).one();
+    this.sql('DELETE FROM auth_attempts WHERE attemptedAt<=?', now - LOGIN_WINDOW);
+    this.sql('DELETE FROM auth_sessions WHERE expiresAt<=?', now);
+    const global = this.sql('SELECT COUNT(*) AS count, MIN(attemptedAt) AS oldest FROM auth_attempts').one();
+    const personal = this.sql('SELECT COUNT(*) AS count, MIN(attemptedAt) AS oldest FROM auth_attempts WHERE ipHash=?', ipHash).one();
     if (global.count >= 100 || personal.count >= 8) {
       const resetAt = Math.max(global.count >= 100 ? global.oldest + LOGIN_WINDOW : 0, personal.count >= 8 ? personal.oldest + LOGIN_WINDOW : 0);
       const retryAfter = Math.max(1, Math.ceil((resetAt - now) / 1000));
       return { status: 429, body: { error: 'too_many_attempts', retryAfter }, retryAfter };
     }
     // Réserver la tentative avant le calcul coûteux ; les requêtes parallèles respectent la limite.
-    this.ctx.storage.sql.exec('INSERT INTO auth_attempts(id,ipHash,attemptedAt) VALUES(?,?,?)', crypto.randomUUID(), ipHash, now);
+    this.sql('INSERT INTO auth_attempts(id,ipHash,attemptedAt) VALUES(?,?,?)', crypto.randomUUID(), ipHash, now);
     if (typeof password !== 'string' || !password.length || password.length > 256) return { status: 401, body: { error: 'unauthorized' } };
     const material = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
     const supplied = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', iterations: 100000, salt: hexBytes(config.salt) }, material, 256);
@@ -258,31 +286,31 @@ export class ClassroomRelay extends DurableObject {
     const payload = { v: 2, aud: 'classe-calme-github', scope: 'publish', channel, iat, exp: iat + AUTH_LIFETIME / 1000, nonce: crypto.randomUUID() };
     const grant = await signedGrant(this.env.TEACHER_AUTH_SECRET, payload);
     const expiresAt = payload.exp * 1000;
-    this.ctx.storage.sql.exec('INSERT INTO auth_sessions(nonce,channel,expiresAt) VALUES(?,?,?)', payload.nonce, channel, expiresAt);
+    this.sql('INSERT INTO auth_sessions(nonce,channel,expiresAt) VALUES(?,?,?)', payload.nonce, channel, expiresAt);
     return { status: 200, body: { grant, expiresAt } };
   }
   isSessionActive(nonce, channel, expiresAt) {
     if (!UUID.test(nonce || '') || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) return false;
-    return Boolean(this.ctx.storage.sql.exec('SELECT nonce FROM auth_sessions WHERE nonce=? AND channel=? AND expiresAt=?', nonce, channel, expiresAt).toArray().length);
+    return Boolean(this.sql('SELECT nonce FROM auth_sessions WHERE nonce=? AND channel=? AND expiresAt=?', nonce, channel, expiresAt).toArray().length);
   }
   revokeSession(nonce) {
-    this.ctx.storage.sql.exec('DELETE FROM auth_sessions WHERE nonce=?', nonce);
+    this.sql('DELETE FROM auth_sessions WHERE nonce=?', nonce);
   }
   async revokeTeacher(nonce, expiresAt) {
-    this.ctx.storage.sql.exec('INSERT INTO revoked(nonce,expiresAt) VALUES(?,?) ON CONFLICT(nonce) DO UPDATE SET expiresAt=MAX(expiresAt,excluded.expiresAt)', nonce, expiresAt);
+    this.sql('INSERT INTO revoked(nonce,expiresAt) VALUES(?,?) ON CONFLICT(nonce) DO UPDATE SET expiresAt=MAX(expiresAt,excluded.expiresAt)', nonce, expiresAt);
     const current = this.stored();
     if (current?.authNonce === nonce) {
-      this.ctx.storage.sql.exec('INSERT INTO closed(sessionId,expiresAt) VALUES(?,?) ON CONFLICT(sessionId) DO UPDATE SET expiresAt=excluded.expiresAt', current.sessionId, Date.now() + 120000);
-      this.ctx.storage.sql.exec('DELETE FROM state WHERE id=1');
+      this.sql('INSERT INTO closed(sessionId,expiresAt) VALUES(?,?) ON CONFLICT(sessionId) DO UPDATE SET expiresAt=excluded.expiresAt', current.sessionId, Date.now() + 120000);
+      this.sql('DELETE FROM state WHERE id=1');
       this.broadcast(this.stored());
     }
-    for (const device of this.ctx.storage.sql.exec('SELECT deviceId,connectionId FROM remote_devices WHERE nonce=?', nonce).toArray()) this.removeDevice(device.deviceId, device.connectionId);
+    for (const device of this.deviceRows().filter(device => device.nonce === nonce)) this.removeDevice(device.deviceId, device.connectionId);
     for (const socket of this.ctx.getWebSockets()) if (this.attachment(socket)?.authNonce === nonce) try { socket.close(1008, 'Signed out'); } catch {}
     await this.scheduleAlarm();
     this.broadcastRemote();
   }
   stored() {
-    const rows = this.ctx.storage.sql.exec('SELECT value FROM state WHERE id=1').toArray();
+    const rows = this.tableRows('state');
     return rows.length ? JSON.parse(rows[0].value) : null;
   }
   publicState(state, now = Date.now()) {
@@ -318,27 +346,29 @@ export class ClassroomRelay extends DurableObject {
   }
   attachment(socket) { try { return socket.deserializeAttachment(); } catch { return null; } }
   remote() {
-    const row = this.ctx.storage.sql.exec('SELECT value FROM remote_room WHERE id=1').toArray()[0];
+    const row = this.tableRows('remote_room')[0];
     return row ? JSON.parse(row.value) : null;
   }
   devices(now = Date.now()) {
-    return this.ctx.storage.sql.exec('SELECT * FROM remote_devices WHERE expiresAt>? AND authExpires>? ORDER BY deviceId', now, now).toArray();
+    return this.deviceRows().map(row => ({ ...row, expiresAt: this.deviceExpiry(row) }))
+      .filter(row => row.expiresAt > now && row.authExpires > now).sort((a, b) => a.deviceId.localeCompare(b.deviceId));
   }
   saveRoom(room, increment = true) {
-    if (increment) room.revision++;
-    const devices = this.devices();
+    const devices = this.deviceRows().filter(device => this.deviceExpiry(device) > Date.now());
     if (devices.length) room.expiresAt = Math.max(...devices.map(device => device.expiresAt));
-    this.ctx.storage.sql.exec('INSERT INTO remote_room(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', JSON.stringify(room));
+    if (JSON.stringify(room) === this.tableRows('remote_room')[0]?.value) return;
+    if (increment) room.revision++;
+    this.sql('INSERT INTO remote_room(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', JSON.stringify(room));
   }
-  file(id) { return this.ctx.storage.sql.exec('SELECT * FROM remote_files WHERE id=?', id).toArray()[0]; }
+  file(id) { return this.tableRows('remote_files').find(file => file.id === id); }
   deleteFile(id) {
-    this.ctx.storage.sql.exec('DELETE FROM remote_chunks WHERE fileId=?', id);
-    this.ctx.storage.sql.exec('DELETE FROM remote_files WHERE id=?', id);
+    this.sql('DELETE FROM remote_chunks WHERE fileId=?', id);
+    this.sql('DELETE FROM remote_files WHERE id=?', id);
   }
   removeDevice(deviceId, connectionId, now = Date.now()) {
-    const row = this.ctx.storage.sql.exec('SELECT * FROM remote_devices WHERE deviceId=?', deviceId).toArray()[0];
+    const row = this.deviceRows().find(device => device.deviceId === deviceId);
     if (!row || (connectionId && row.connectionId !== connectionId)) return false;
-    this.ctx.storage.sql.exec('DELETE FROM remote_devices WHERE deviceId=?', deviceId);
+    this.sql('DELETE FROM remote_devices WHERE deviceId=?', deviceId);
     const room = this.remote();
     if (room) {
       if (room.controller?.deviceId === deviceId) room.controller = null;
@@ -350,7 +380,7 @@ export class ClassroomRelay extends DurableObject {
   }
   cleanupRemote(now = Date.now()) {
     let changed = false;
-    for (const row of this.ctx.storage.sql.exec('SELECT * FROM remote_devices WHERE expiresAt<=? OR authExpires<=?', now, now).toArray()) {
+    for (const row of this.deviceRows().filter(device => this.deviceExpiry(device) <= now)) {
       changed = this.removeDevice(row.deviceId, row.connectionId, now) || changed;
       for (const socket of this.ctx.getWebSockets()) {
         const info = this.attachment(socket);
@@ -359,12 +389,12 @@ export class ClassroomRelay extends DurableObject {
     }
     const room = this.remote();
     if (room && !this.devices(now).length && room.expiresAt <= now) {
-      this.ctx.storage.sql.exec('DELETE FROM remote_room');
-      this.ctx.storage.sql.exec('DELETE FROM remote_chunks');
-      this.ctx.storage.sql.exec('DELETE FROM remote_files');
+      this.sql('DELETE FROM remote_room');
+      this.sql('DELETE FROM remote_chunks');
+      this.sql('DELETE FROM remote_files');
       return true;
     }
-    const expired = this.ctx.storage.sql.exec('SELECT id FROM remote_files WHERE expiresAt<=? OR (orphanUntil IS NOT NULL AND orphanUntil<=?)', now, now).toArray();
+    const expired = this.tableRows('remote_files').filter(file => file.expiresAt <= now || (file.orphanUntil !== null && file.orphanUntil <= now));
     for (const row of expired) this.deleteFile(row.id);
     if (room && expired.length) {
       const removed = new Set(expired.map(row => row.id));
@@ -378,22 +408,30 @@ export class ClassroomRelay extends DurableObject {
     return changed;
   }
   async scheduleAlarm() {
-    const now = Date.now();
-    const deadlines = [];
-    const legacy = this.stored();
-    if (legacy?.expiresAt > now) deadlines.push(legacy.expiresAt);
-    const room = this.remote();
-    if (room) {
-      deadlines.push(room.expiresAt);
-      if (room.testUntil > now) deadlines.push(room.testUntil);
-      if (room.pauseUntil > now) deadlines.push(room.pauseUntil);
-    }
-    const device = this.ctx.storage.sql.exec('SELECT MIN(MIN(expiresAt,authExpires)) AS next FROM remote_devices').one().next;
-    if (device) deadlines.push(device);
-    const file = this.ctx.storage.sql.exec('SELECT MIN(MIN(expiresAt,COALESCE(orphanUntil,expiresAt))) AS next FROM remote_files').one().next;
-    if (file) deadlines.push(file);
-    if (deadlines.length) await this.ctx.storage.setAlarm(Math.max(now + 1, Math.min(...deadlines)));
-    else await this.ctx.storage.deleteAlarm();
+    const update = async () => {
+      // getAlarm() also recovers the existing deadline after hibernation.
+      const current = await this.ctx.storage.getAlarm();
+      const now = Date.now();
+      const deadlines = [];
+      const legacy = this.stored();
+      if (legacy?.expiresAt > now) deadlines.push(legacy.expiresAt);
+      const devices = this.deviceRows().map(device => this.deviceExpiry(device));
+      const room = this.remote();
+      if (room) {
+        deadlines.push(devices.length ? Math.max(...devices) : room.expiresAt);
+        if (room.testUntil > now) deadlines.push(room.testUntil);
+        if (room.pauseUntil > now) deadlines.push(room.pauseUntil);
+      }
+      deadlines.push(...devices);
+      for (const file of this.tableRows('remote_files')) deadlines.push(Math.min(file.expiresAt, file.orphanUntil ?? file.expiresAt));
+      const next = deadlines.length ? Math.max(now + 1, Math.min(...deadlines)) : null;
+      // An already scheduled earlier wake-up is safe; postponing every heartbeat
+      // would add a storage write while providing no additional reliability.
+      if (next === null) { if (current !== null) await this.ctx.storage.deleteAlarm(); }
+      else if (current === null || current <= now || current > next) await this.ctx.storage.setAlarm(next);
+    };
+    this.alarmUpdate = this.alarmUpdate.catch(() => {}).then(update);
+    return this.alarmUpdate;
   }
   remotePublicState(now = Date.now()) {
     const room = this.remote();
@@ -416,13 +454,13 @@ export class ClassroomRelay extends DurableObject {
       viewers: stats.viewers, activities: stats.activities };
   }
   effectiveNoise(room, now = Date.now()) {
-    return { level: room.noise.level, alarm: Boolean(room.pauseUntil <= now && (room.noise.alarm || room.testUntil > now)), pausedUntil: room.pauseUntil || 0, testUntil: room.testUntil || 0 };
+    return { level: 0, alarm: Boolean(room.pauseUntil <= now && (room.noise.alarm || room.testUntil > now)), pausedUntil: room.pauseUntil || 0, testUntil: room.testUntil || 0 };
   }
   validTeacher(socket, now = Date.now()) {
     const info = this.attachment(socket);
     if (info?.role !== 'teacher' || info.authExpires <= now) return null;
-    const row = this.ctx.storage.sql.exec('SELECT * FROM remote_devices WHERE deviceId=? AND connectionId=? AND nonce=? AND expiresAt>? AND authExpires>?', info.deviceId, info.connectionId, info.authNonce, now, now).toArray()[0];
-    if (!row || this.ctx.storage.sql.exec('SELECT nonce FROM revoked WHERE nonce=? AND expiresAt>?', info.authNonce, now).toArray().length) return null;
+    const row = this.deviceRows().find(device => device.deviceId === info.deviceId && device.connectionId === info.connectionId && device.nonce === info.authNonce && this.deviceExpiry(device) > now);
+    if (!row || this.revoked(info.authNonce, now)) return null;
     return { ...info, row };
   }
   broadcastRemote() {
@@ -442,19 +480,19 @@ export class ClassroomRelay extends DurableObject {
     const label = url.searchParams.get('label') || 'Appareil';
     const authNonce = request.headers.get('x-classroom-auth-nonce');
     const authExpires = Number(request.headers.get('x-classroom-auth-expires'));
-    if (!UUID.test(authNonce || '') || !Number.isSafeInteger(authExpires) || authExpires <= Date.now() || this.ctx.storage.sql.exec('SELECT nonce FROM revoked WHERE nonce=?', authNonce).toArray().length) return json({ error: 'unauthorized' }, 401);
+    if (!UUID.test(authNonce || '') || !Number.isSafeInteger(authExpires) || authExpires <= Date.now() || this.revoked(authNonce)) return json({ error: 'unauthorized' }, 401);
     if (!UUID.test(deviceId || '') || !plainText(label, 40) || !label.trim()) return json({ error: 'invalid_device' }, 400);
     const now = Date.now();
     this.cleanupRemote(now);
     if (this.devices(now).length >= 16 && !this.devices(now).some(device => device.deviceId === deviceId)) return json({ error: 'full' }, 503);
-    const previous = this.ctx.storage.sql.exec('SELECT connectionId FROM remote_devices WHERE deviceId=?', deviceId).toArray()[0];
+    const previous = this.deviceRows().find(device => device.deviceId === deviceId);
     if (previous) for (const socket of this.ctx.getWebSockets()) {
       if (this.attachment(socket)?.connectionId === previous.connectionId) try { socket.close(1008, 'Replaced'); } catch {}
     }
     const isNew = !this.remote();
     const room = this.remote() || defaultRoom(now);
     const connectionId = crypto.randomUUID();
-    this.ctx.storage.sql.exec('INSERT INTO remote_devices(deviceId,label,nonce,authExpires,expiresAt,connectionId) VALUES(?,?,?,?,?,?) ON CONFLICT(deviceId) DO UPDATE SET label=excluded.label,nonce=excluded.nonce,authExpires=excluded.authExpires,expiresAt=excluded.expiresAt,connectionId=excluded.connectionId', deviceId, label.trim(), authNonce, authExpires, Math.min(now + TTL, authExpires), connectionId);
+    this.sql('INSERT INTO remote_devices(deviceId,label,nonce,authExpires,expiresAt,connectionId) VALUES(?,?,?,?,?,?) ON CONFLICT(deviceId) DO UPDATE SET label=excluded.label,nonce=excluded.nonce,authExpires=excluded.authExpires,expiresAt=excluded.expiresAt,connectionId=excluded.connectionId', deviceId, label.trim(), authNonce, authExpires, Math.min(now + TTL, authExpires), connectionId);
     if (isNew) room.controller = { deviceId, label: label.trim() };
     // Un retour réseau ne rallume jamais un ancien microphone à distance.
     if (previous && room.microphone?.deviceId === deviceId) { room.microphone = null; room.noise = { level: 0, alarm: false }; room.noiseAt = 0; }
@@ -462,7 +500,7 @@ export class ClassroomRelay extends DurableObject {
     this.saveRoom(room);
     const [client, server] = Object.values(new WebSocketPair());
     this.ctx.acceptWebSocket(server, ['teacher']);
-    server.serializeAttachment({ role: 'teacher', deviceId, label: label.trim(), authNonce, authExpires, connectionId });
+    server.serializeAttachment({ role: 'teacher', deviceId, label: label.trim(), authNonce, authExpires, connectionId, lastSeenAt: now });
     await this.scheduleAlarm();
     this.broadcastRemote();
     return new Response(null, { status: 101, webSocket: client, headers: { 'sec-websocket-protocol': 'classe-calme' } });
@@ -474,13 +512,13 @@ export class ClassroomRelay extends DurableObject {
     const id = url.searchParams.get('id');
     const authNonce = request.headers.get('x-classroom-auth-nonce');
     const authExpires = Number(request.headers.get('x-classroom-auth-expires'));
-    if (!UUID.test(authNonce || '') || !Number.isSafeInteger(authExpires) || authExpires <= now || this.ctx.storage.sql.exec('SELECT nonce FROM revoked WHERE nonce=?', authNonce).toArray().length) return json({ error: 'unauthorized' }, 401);
+    if (!UUID.test(authNonce || '') || !Number.isSafeInteger(authExpires) || authExpires <= now || this.revoked(authNonce, now)) return json({ error: 'unauthorized' }, 401);
     if (!UUID.test(id || '')) return json({ error: 'invalid_file' }, 400);
     if (request.method === 'GET') {
       const file = this.file(id);
       if (!file?.complete || file.expiresAt <= now) return json({ error: 'not_found' }, 404);
       // Au plus 15 Mio, lus par morceaux SQL ; aucune URL publique n'est créée.
-      const chunks = this.ctx.storage.sql.exec('SELECT data FROM remote_chunks WHERE fileId=? ORDER BY part', id).toArray();
+      const chunks = this.sql('SELECT data FROM remote_chunks WHERE fileId=? ORDER BY part', id).toArray();
       let part = 0;
       const stream = new ReadableStream({ pull(controller) {
         if (part === chunks.length) { controller.close(); return; }
@@ -490,7 +528,7 @@ export class ClassroomRelay extends DurableObject {
     }
     const deviceId = url.searchParams.get('deviceId');
     const room = this.remote();
-    const device = this.ctx.storage.sql.exec('SELECT deviceId FROM remote_devices WHERE deviceId=? AND nonce=? AND expiresAt>? AND authExpires>?', deviceId, authNonce, now, now).toArray()[0];
+    const device = this.devices(now).find(device => device.deviceId === deviceId && device.nonce === authNonce);
     if (!device || room?.controller?.deviceId !== deviceId) return json({ error: 'controller_required' }, 409);
     const part = Number(url.searchParams.get('part'));
     const parts = Number(url.searchParams.get('parts'));
@@ -499,29 +537,29 @@ export class ClassroomRelay extends DurableObject {
     try { bytes = await readBytes(request, FILE_CHUNK); } catch { return json({ error: 'file_too_large' }, 413); }
     // Le contrôle a pu changer pendant la lecture réseau du morceau.
     const current = this.remote();
-    if (!current || current.controller?.deviceId !== deviceId || !this.ctx.storage.sql.exec('SELECT deviceId FROM remote_devices WHERE deviceId=? AND nonce=? AND expiresAt>? AND authExpires>?', deviceId, authNonce, Date.now(), Date.now()).toArray().length || this.ctx.storage.sql.exec('SELECT nonce FROM revoked WHERE nonce=?', authNonce).toArray().length) return json({ error: 'controller_required' }, 409);
+    if (!current || current.controller?.deviceId !== deviceId || !this.devices().some(device => device.deviceId === deviceId && device.nonce === authNonce) || this.revoked(authNonce)) return json({ error: 'controller_required' }, 409);
     if (!bytes.length || (part < parts - 1 && bytes.length !== FILE_CHUNK)) return json({ error: 'invalid_chunk' }, 400);
     let file = this.file(id);
     if (!file) {
       if (part !== 0 || bytes.length < 5 || String.fromCharCode(...bytes.subarray(0, 5)) !== '%PDF-') return json({ error: 'invalid_pdf' }, 400);
-      if (this.ctx.storage.sql.exec('SELECT COUNT(*) AS count FROM remote_files').one().count >= 200) return json({ error: 'room_file_limit' }, 413);
+      if (this.sql('SELECT COUNT(*) AS count FROM remote_files').one().count >= 200) return json({ error: 'room_file_limit' }, 413);
     } else if (file.parts !== parts) return json({ error: 'file_conflict' }, 409);
-    const old = this.ctx.storage.sql.exec('SELECT data FROM remote_chunks WHERE fileId=? AND part=?', id, part).toArray()[0];
+    const old = this.sql('SELECT data FROM remote_chunks WHERE fileId=? AND part=?', id, part).toArray()[0];
     if (old) {
       const previous = new Uint8Array(old.data);
       if (previous.length !== bytes.length || previous.some((value, index) => value !== bytes[index])) return json({ error: 'file_conflict' }, 409);
       return json({ ok: true, complete: Boolean(file.complete), size: file.size });
     }
     const size = (file?.size || 0) + bytes.length;
-    const total = this.ctx.storage.sql.exec('SELECT COALESCE(SUM(size),0) AS size FROM remote_files').one().size;
+    const total = this.sql('SELECT COALESCE(SUM(size),0) AS size FROM remote_files').one().size;
     if (size > FILE_MAX || total + bytes.length > ROOM_FILE_MAX) return json({ error: 'room_file_limit' }, 413);
     if (!file) {
-      this.ctx.storage.sql.exec('INSERT INTO remote_files(id,parts,size,complete,expiresAt,orphanUntil) VALUES(?,?,0,0,?,?)', id, parts, Date.now() + AUTH_LIFETIME, Date.now() + FILE_GRACE);
+      this.sql('INSERT INTO remote_files(id,parts,size,complete,expiresAt,orphanUntil) VALUES(?,?,0,0,?,?)', id, parts, Date.now() + AUTH_LIFETIME, Date.now() + FILE_GRACE);
       file = this.file(id);
     }
-    this.ctx.storage.sql.exec('INSERT INTO remote_chunks(fileId,part,data) VALUES(?,?,?)', id, part, bytes.buffer);
-    const complete = this.ctx.storage.sql.exec('SELECT COUNT(*) AS count FROM remote_chunks WHERE fileId=?', id).one().count === parts;
-    this.ctx.storage.sql.exec('UPDATE remote_files SET size=?,complete=?,orphanUntil=? WHERE id=?', size, complete ? 1 : 0, Date.now() + FILE_GRACE, id);
+    this.sql('INSERT INTO remote_chunks(fileId,part,data) VALUES(?,?,?)', id, part, bytes.buffer);
+    const complete = this.sql('SELECT COUNT(*) AS count FROM remote_chunks WHERE fileId=?', id).one().count === parts;
+    this.sql('UPDATE remote_files SET size=?,complete=?,orphanUntil=? WHERE id=?', size, complete ? 1 : 0, Date.now() + FILE_GRACE, id);
     await this.scheduleAlarm();
     return json({ ok: true, complete, size });
   }
@@ -580,20 +618,20 @@ export class ClassroomRelay extends DurableObject {
     this.cleanupRemote(now);
     if (this.remote()) return json({ error: 'teacher_remote_active' }, 409);
     const current = this.stored();
-    this.ctx.storage.sql.exec('DELETE FROM closed WHERE expiresAt<?', now);
-    this.ctx.storage.sql.exec('DELETE FROM revoked WHERE expiresAt<=?', now);
-    if (this.ctx.storage.sql.exec('SELECT nonce FROM revoked WHERE nonce=?', authNonce).toArray().length) return json({ error: 'unauthorized' }, 401);
+    this.sql('DELETE FROM closed WHERE expiresAt<?', now);
+    this.sql('DELETE FROM revoked WHERE expiresAt<=?', now);
+    if (this.revoked(authNonce, now)) return json({ error: 'unauthorized' }, 401);
     if (current?.sessionId === body.sessionId && current.authNonce && current.authNonce !== authNonce) return json({ error: 'another_teacher_tab' }, 409);
     if (body.action === 'release') {
-      this.ctx.storage.sql.exec('INSERT INTO closed(sessionId,expiresAt) VALUES(?,?) ON CONFLICT(sessionId) DO UPDATE SET expiresAt=excluded.expiresAt', body.sessionId, now + 120000);
+      this.sql('INSERT INTO closed(sessionId,expiresAt) VALUES(?,?) ON CONFLICT(sessionId) DO UPDATE SET expiresAt=excluded.expiresAt', body.sessionId, now + 120000);
       if (current?.sessionId === body.sessionId) {
-        this.ctx.storage.sql.exec('DELETE FROM state WHERE id=1');
+        this.sql('DELETE FROM state WHERE id=1');
         await this.scheduleAlarm();
         this.broadcast(this.stored());
       }
       return json(this.teacherStats(false));
     }
-    if (this.ctx.storage.sql.exec('SELECT sessionId FROM closed WHERE sessionId=?', body.sessionId).toArray().length) return json({ error: 'session_released' }, 410);
+    if (this.sql('SELECT sessionId FROM closed WHERE sessionId=?', body.sessionId).toArray().length) return json({ error: 'session_released' }, 410);
     if (body.action !== 'claim' && current?.expiresAt > now && current.sessionId !== body.sessionId) return json({ error: 'another_teacher_tab' }, 409);
     if (typeof body.alarm !== 'boolean' || !['cover', 'border'].includes(body.mode) || typeof body.pulse !== 'boolean') return json({ error: 'invalid_state' }, 400);
     if (body.message !== undefined && !plainText(body.message, 120)) return json({ error: 'invalid_message' }, 400);
@@ -621,10 +659,10 @@ export class ClassroomRelay extends DurableObject {
       }
     }
     if (body.action === 'claim' && current?.expiresAt > now && current.sessionId !== body.sessionId) {
-      this.ctx.storage.sql.exec('INSERT INTO closed(sessionId,expiresAt) VALUES(?,?) ON CONFLICT(sessionId) DO UPDATE SET expiresAt=excluded.expiresAt', current.sessionId, now + 120000);
+      this.sql('INSERT INTO closed(sessionId,expiresAt) VALUES(?,?) ON CONFLICT(sessionId) DO UPDATE SET expiresAt=excluded.expiresAt', current.sessionId, now + 120000);
     }
     const state = { sessionId: body.sessionId, authNonce, expiresAt: Math.min(now + TTL, authExpires), alarm: body.alarm, mode: body.mode, pulse: body.pulse, message, notice, timer };
-    this.ctx.storage.sql.exec('INSERT INTO state(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', JSON.stringify(state));
+    this.sql('INSERT INTO state(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', JSON.stringify(state));
     await this.scheduleAlarm();
     // Une déconnexion arrivée pendant l'écriture de l'alarme garde la priorité.
     this.broadcast(this.stored());
@@ -634,15 +672,15 @@ export class ClassroomRelay extends DurableObject {
     const now = Date.now();
     this.cleanupRemote(now);
     const state = this.stored();
-    if (state && state.expiresAt <= now) this.ctx.storage.sql.exec('DELETE FROM state WHERE id=1');
+    if (state && state.expiresAt <= now) this.sql('DELETE FROM state WHERE id=1');
     const room = this.remote();
     if (room && ((room.testUntil && room.testUntil <= now) || (room.pauseUntil && room.pauseUntil <= now))) {
       if (room.testUntil <= now) room.testUntil = 0;
       if (room.pauseUntil <= now) room.pauseUntil = 0;
       this.saveRoom(room);
     }
-    this.ctx.storage.sql.exec('DELETE FROM revoked WHERE expiresAt<=?', now);
-    this.ctx.storage.sql.exec('DELETE FROM closed WHERE expiresAt<=?', now);
+    this.sql('DELETE FROM revoked WHERE expiresAt<=?', now);
+    this.sql('DELETE FROM closed WHERE expiresAt<=?', now);
     await this.scheduleAlarm();
     this.broadcastRemote();
   }
@@ -659,8 +697,13 @@ export class ClassroomRelay extends DurableObject {
     const rate = info.rate?.start > now - 1000 ? info.rate : { start: now, count: 0 };
     rate.count++;
     if (rate.count > 30) { socket.close(1008, 'Too many commands'); this.removeDevice(info.deviceId, info.connectionId); await this.scheduleAlarm(); this.broadcastRemote(); return; }
-    socket.serializeAttachment({ role: 'teacher', deviceId: info.deviceId, label: info.label, authNonce: info.authNonce, authExpires: info.authExpires, connectionId: info.connectionId, rate });
-    this.ctx.storage.sql.exec('UPDATE remote_devices SET expiresAt=? WHERE deviceId=? AND connectionId=?', Math.min(now + TTL, info.authExpires), info.deviceId, info.connectionId);
+    // WebSocket attachments survive hibernation. Retaining the latest contact
+    // there preserves the full 35-second timeout without a SQL write per sample.
+    socket.serializeAttachment({ role: 'teacher', deviceId: info.deviceId, label: info.label, authNonce: info.authNonce, authExpires: info.authExpires, connectionId: info.connectionId, lastSeenAt: now, rate });
+    const expiresAt = Math.min(now + TTL, info.authExpires);
+    if (expiresAt - info.row.expiresAt >= PRESENCE_WRITE_INTERVAL) {
+      this.sql('UPDATE remote_devices SET expiresAt=? WHERE deviceId=? AND connectionId=?', expiresAt, info.deviceId, info.connectionId);
+    }
     let room = this.remote();
     if (!room) { socket.close(1008, 'Room expired'); return; }
     if (body.type === 'ping') {
@@ -676,8 +719,8 @@ export class ClassroomRelay extends DurableObject {
       if (body.action === 'take-control') room.controller = { deviceId: info.deviceId, label: info.label };
       else if (body.action === 'display') {
         room.display = cleanDisplay(body.display, id => Boolean(this.file(id)?.complete && this.file(id).expiresAt > now));
-        this.ctx.storage.sql.exec('UPDATE remote_files SET orphanUntil=? WHERE orphanUntil IS NULL', now + FILE_GRACE);
-        for (const doc of room.display.documents) if (doc.kind === 'pdf') this.ctx.storage.sql.exec('UPDATE remote_files SET orphanUntil=NULL WHERE id=?', doc.fileId);
+        this.sql('UPDATE remote_files SET orphanUntil=? WHERE orphanUntil IS NULL', now + FILE_GRACE);
+        for (const doc of room.display.documents) if (doc.kind === 'pdf') this.sql('UPDATE remote_files SET orphanUntil=NULL WHERE id=?', doc.fileId);
       } else if (body.action === 'tools') room.tools = cleanTools(body.tools, now);
       else if (body.action === 'link') {
         if (typeof body.enabled !== 'boolean') throw new Error('invalid_link');
@@ -702,8 +745,10 @@ export class ClassroomRelay extends DurableObject {
         if (room.microphone?.deviceId !== info.deviceId) throw new Error('microphone_required');
         if (!body.noise || !Number.isFinite(body.noise.level) || body.noise.level < 0 || body.noise.level > 100 || typeof body.noise.alarm !== 'boolean') throw new Error('invalid_noise');
         if (now - room.noiseAt < 240 && room.noise.alarm === body.noise.alarm) broadcast = false;
+        else if (room.noise.level === 0 && room.noise.alarm === body.noise.alarm) broadcast = false;
         else {
-          room.noise = { level: Math.round(body.noise.level), alarm: body.noise.alarm };
+          // Only the alert is shared. Ignore numeric levels from older clients.
+          room.noise = { level: 0, alarm: body.noise.alarm };
           room.noiseAt = now;
         }
       } else if (body.action === 'test-alert') {

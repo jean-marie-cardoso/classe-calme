@@ -43,6 +43,14 @@ Chaque activité affiche son propre PDF **Corrigé élève**, au-dessus de la pa
 
 **Masquer la correction** retire le lecteur et bloque les nouvelles lectures du PDF. Désactiver la liaison aux activités ou déconnecter le dernier appareil professeur coupe aussi cet accès ; en cas de perte réseau, il expire sous 35 secondes. Une copie déjà reçue ne peut pas être effacée à distance. Cette fonction est absente de la version à partager.
 
+### Limiter les échanges Cloudflare
+
+La mesure et la jauge du micro restent uniquement sur l'appareil qui écoute. Aucun niveau sonore n'est transmis : seuls les changements d'alerte sont envoyés immédiatement. Les commandes identiques ne sont pas répétées. Sans commande récente confirmée, un message de présence toutes les 15 secondes conserve la connexion ; les minuteurs continuent de décompter directement dans chaque navigateur.
+
+Le relais évite les écritures et reprogrammations d'alarme inutiles. Les données nécessaires aux droits, à la reprise après veille du serveur et à l'expiration restent conservées. La liaison expire toujours sous 35 secondes après le dernier contact professeur. Les quotas gratuits sont partagés avec les autres usages du compte Cloudflare ; les messages sur une connexion WebSocket ouverte ne sont pas des nouvelles requêtes HTTP Workers.
+
+Les tests du relais simulent 6 heures, 30 activités connectées, deux appareils professeur, 360 changements d'alerte et des reprises du serveur : environ 5 400 écritures SQL et d'alarme, avec un majorant de 10 100 en doublant les écritures SQL pour les index. Cette simulation sert de contrôle de régression ; elle ne remplace pas les compteurs de facturation Cloudflare. Les tests vérifient aussi qu'aucun changement de niveau sonore ne provoque un envoi et que les alertes restent immédiates.
+
 ## Sources et publication
 
 - `public/` : page GitHub Pages, publiée automatiquement depuis `main`.

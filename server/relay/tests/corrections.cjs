@@ -15,7 +15,7 @@ const catalog = new Function(catalogSource.replace('export const CORRECTIONS', '
 let source = fs.readFileSync(path.join(relay, 'src/index.js'), 'utf8')
   .replace("import { CORRECTIONS } from './corrections-catalog.js';", catalogSource.replace('export const CORRECTIONS', 'const CORRECTIONS'))
   .replace('export default {', 'const app = {')
-  .replace('  async alarm() {', "  async expireForCorrectionTest() { this.ctx.storage.sql.exec('UPDATE remote_devices SET expiresAt=?', Date.now()-1); await this.alarm(); }\n  async alarm() {");
+  .replace('  async alarm() {', "  async expireForCorrectionTest() { this.sql('UPDATE remote_devices SET expiresAt=?', Date.now()-1); for (const socket of this.ctx.getWebSockets()) { const info = this.attachment(socket); if (info?.role === 'teacher') socket.serializeAttachment({ ...info, lastSeenAt: Date.now()-35001 }); } await this.alarm(); }\n  async alarm() {");
 source += "\nexport default { async fetch(request, env) { if (new URL(request.url).pathname === '/__test/expire') { await env.CLASSROOM.getByName('" + channel + "').expireForCorrectionTest(); return new Response('ok'); } return app.fetch(request, env); } };";
 let assetReads = 0, assetFailure = false, heldAsset = null;
 const mf = new Miniflare(convertV4MiniflareOptions({

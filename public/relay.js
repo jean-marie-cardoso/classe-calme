@@ -15,16 +15,19 @@
   const deviceLabel = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? 'Mac' : /Win/.test(navigator.platform || navigator.userAgent) ? 'PC' : 'Appareil';
   const chunkSize = 256 * 1024;
   const maxFileSize = 15 * 1024 * 1024;
+  const noiseRetryInterval = 10000;
+  const heartbeatInterval = 15000;
   const pending = new Map(), uploading = new Map(), knownFiles = new Set(), downloaded = new Map();
   const roomWaiters = new Set();
   let socket = null, generation = 0, reconnectTimer = null, pingTimer = null;
   let retryDelay = 1000, hidden = false, received = false, initialized = false;
   let room = null, highestRevision = -1, applyingTools = false, activityStats = [];
-  let displayVersion = 0, displaySent = 0, displayBusy = false, displayApplyBusy = false, appliedDisplay = '';
-  let toolsVersion = 0, toolsSent = 0, toolsBusy = false, appliedTools = '', toolTimer = null;
+  let displayVersion = 0, displaySent = 0, displayBusy = false, displayApplyBusy = false, appliedDisplay = '', lastDisplaySent = '';
+  let toolsVersion = 0, toolsSent = 0, toolsBusy = false, appliedTools = '', toolTimer = null, lastToolsSent = '';
   let transferController = new AbortController(), clockOffset = 0;
   let micAttempt = 0, micClaimPending = false, localMicIntent = false, latestNoise = { level: 0, alarm: false };
-  let noiseTimer = null, lastNoiseSent = 0, micOwned = false;
+  let noiseTimer = null, lastNoiseSent = -Infinity, lastNoisePacket = null, noiseRetry = false, micOwned = false;
+  let lastPresenceAt = 0;
   let takingControl = false, errorMessage = '';
   let controllerLocalDisplay = false, controllerLocalTools = false;
   let correctionBusy = false, correctionAttempt = 0, correctionError = '';
@@ -175,10 +178,24 @@
     const current = socket;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { pending.delete(requestId); reject(new Error('timeout')); }, 10000);
-      pending.set(requestId, { resolve, reject, timer, socket: current });
+      pending.set(requestId, { resolve, reject, timer, socket: current, sentAt: performance.now() });
       try { current.send(JSON.stringify({ type: 'command', requestId, action, ...values })); }
       catch (error) { clearTimeout(timer); pending.delete(requestId); reject(error); }
     });
+  }
+  function scheduleHeartbeat(current = socket) {
+    clearTimeout(pingTimer); pingTimer = null;
+    if (!current || socket !== current || current.readyState !== WebSocket.OPEN || !auth.getGrant()) return;
+    const delay = Math.max(0, heartbeatInterval - (performance.now() - lastPresenceAt));
+    pingTimer = setTimeout(() => {
+      pingTimer = null;
+      if (socket !== current || current.readyState !== WebSocket.OPEN || !auth.getGrant()) return;
+      try {
+        current.send(JSON.stringify({ type: 'ping' }));
+        lastPresenceAt = performance.now();
+        scheduleHeartbeat(current);
+      } catch { /* La fermeture du socket déclenchera la reconnexion. */ }
+    }, delay);
   }
   function rejectPending() {
     for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error('offline')); }
@@ -279,14 +296,15 @@
       return blob;
     } catch (error) { if (downloaded.get(fileId) === promise) downloaded.delete(fileId); throw error; }
   }
-  function localTools() {
-    const value = tools?.getBroadcastState() || { message: 'MOINS DE BRUIT, MERCI.', notice: null, timer: null };
+  function toolsSnapshot() { return tools?.getBroadcastState() || { message: 'MOINS DE BRUIT, MERCI.', notice: null, timer: null }; }
+  function localTools(value = toolsSnapshot()) {
     if (value.notice) value.notice = { ...value.notice, until: value.notice.until - clockOffset };
     if (value.timer?.state === 'running') value.timer = { ...value.timer, until: value.timer.until - clockOffset };
     return value;
   }
   function queueDisplay() {
     if (!isController()) return;
+    if (displaySent === displayVersion && JSON.stringify(display.getState()) === lastDisplaySent) return;
     controllerLocalDisplay = true;
     displayVersion++;
     void flushDisplay();
@@ -299,6 +317,8 @@
       while (isController() && generation === currentGeneration && displaySent !== displayVersion) {
         const version = displayVersion;
         const state = display.getState();
+        const signature = JSON.stringify(state);
+        if (signature === lastDisplaySent) { displaySent = version; continue; }
         const files = state.documents.filter(item => item.kind === 'pdf' && !knownFiles.has(item.fileId));
         if (files.length) setError('Envoi du PDF…');
         for (const item of files) await uploadFile(item.fileId);
@@ -307,6 +327,7 @@
         await command('display', { display: state });
         if (generation !== currentGeneration) return;
         displaySent = version;
+        lastDisplaySent = signature;
         errorMessage = '';
         renderStatus();
       }
@@ -321,6 +342,7 @@
   }
   function queueTools() {
     if (applyingTools || !isController()) return;
+    if (toolsSent === toolsVersion && JSON.stringify(toolsSnapshot()) === lastToolsSent) return;
     controllerLocalTools = true;
     toolsVersion++;
     clearTimeout(toolTimer);
@@ -333,9 +355,13 @@
     try {
       while (isController() && currentGeneration === generation && toolsSent !== toolsVersion) {
         const version = toolsVersion;
-        await command('tools', { tools: localTools() });
+        const value = toolsSnapshot();
+        const signature = JSON.stringify(value);
+        if (signature === lastToolsSent) { toolsSent = version; continue; }
+        await command('tools', { tools: localTools(value) });
         if (generation !== currentGeneration) return;
         toolsSent = version;
+        lastToolsSent = signature;
       }
     } catch {
       if (currentGeneration === generation && isController()) { toolsSent = toolsVersion; setError('Modification non envoyée. Réessaie.'); }
@@ -349,7 +375,11 @@
     const signature = JSON.stringify(room.tools);
     if (appliedTools === signature) return;
     applyingTools = true;
-    try { tools?.applyBroadcastState(room.tools, { serverNow: room.serverNow }); appliedTools = signature; }
+    try {
+      tools?.applyBroadcastState(room.tools, { serverNow: room.serverNow });
+      appliedTools = signature;
+      lastToolsSent = JSON.stringify(toolsSnapshot());
+    }
     finally { applyingTools = false; }
   }
   async function applyRemoteDisplay() {
@@ -365,6 +395,7 @@
         await display.applyState(state, loadFile);
         if (generation !== currentGeneration) return;
         appliedDisplay = signature;
+        lastDisplaySent = signature;
       }
     } catch {
       if (generation === currentGeneration) setError('PDF indisponible. Vérifie la connexion.');
@@ -376,6 +407,10 @@
   function applyNoise() {
     if (!room || !isReady()) return;
     const mine = room.microphone?.deviceId === deviceId;
+    if (micOwned !== mine) {
+      clearTimeout(noiseTimer); noiseTimer = null;
+      lastNoiseSent = -Infinity; lastNoisePacket = null; noiseRetry = false;
+    }
     if (!micClaimPending && !mine && micOwned && display.getMicrophoneState()) display.stopMicrophone();
     micOwned = mine;
     const locallyMeasuring = mine && display.getMicrophoneState();
@@ -416,9 +451,9 @@
     initialized = true;
     if (initializeLocal) {
       if (localState.documents.length) queueDisplay();
-      else appliedDisplay = JSON.stringify(value.display);
+      else appliedDisplay = lastDisplaySent = JSON.stringify(value.display);
       queueTools();
-      void command('link', { enabled: checkbox.checked }).catch(() => {});
+      if (Boolean(value.linkActivities) !== checkbox.checked) void command('link', { enabled: checkbox.checked }).catch(() => {});
     } else {
       checkbox.checked = Boolean(value.linkActivities);
       applyRemoteTools();
@@ -435,9 +470,10 @@
     correctionAttempt++;
     correctionBusy = false;
     correctionError = '';
-    clearInterval(pingTimer); pingTimer = null;
+    clearTimeout(pingTimer); pingTimer = null;
     clearTimeout(toolTimer); toolTimer = null;
     clearTimeout(noiseTimer); noiseTimer = null;
+    lastNoiseSent = -Infinity; lastNoisePacket = null; noiseRetry = false;
     rejectPending();
     transferController.abort(); transferController = new AbortController();
     uploading.clear(); downloaded.clear(); knownFiles.clear();
@@ -448,7 +484,7 @@
     setFollowing(false);
     displaySent = displayVersion;
     toolsSent = toolsVersion;
-    appliedDisplay = appliedTools = '';
+    appliedDisplay = appliedTools = lastDisplaySent = lastToolsSent = '';
     controllerLocalDisplay = controllerLocalTools = false;
   }
   function disconnect() {
@@ -491,7 +527,8 @@
     renderStatus();
     current.addEventListener('open', () => {
       if (socket !== current || generation !== currentGeneration) { current.close(); return; }
-      pingTimer = setInterval(() => { if (current.readyState === WebSocket.OPEN) current.send(JSON.stringify({ type: 'ping' })); }, 10000);
+      lastPresenceAt = performance.now();
+      scheduleHeartbeat(current);
     });
     current.addEventListener('message', event => {
       if (socket !== current || generation !== currentGeneration) return;
@@ -501,7 +538,13 @@
         const request = pending.get(value.requestId);
         if (!request || request.socket !== current) return;
         clearTimeout(request.timer); pending.delete(value.requestId);
-        if (value.ok) request.resolve(value);
+        if (value.ok) {
+          // Commands renew server presence too. Their acknowledgements replace idle pings.
+          // Use send time rather than ACK time, so latency cannot extend the lease.
+          lastPresenceAt = Math.max(lastPresenceAt, request.sentAt);
+          scheduleHeartbeat(current);
+          request.resolve(value);
+        }
         else request.reject(new Error(value.error || 'command'));
       } else acceptRoom(value);
     });
@@ -567,15 +610,33 @@
   async function sendNoise() {
     clearTimeout(noiseTimer); noiseTimer = null;
     if (!isReady() || room?.microphone?.deviceId !== deviceId || !display.getMicrophoneState()) return;
-    const delay = 250 - (performance.now() - lastNoiseSent);
+    const unchanged = lastNoisePacket && latestNoise.alarm === lastNoisePacket.alarm;
+    if (unchanged && !noiseRetry) return;
+    // The gauge and microphone stay local. Only alarm changes cross the relay,
+    // immediately, even while an earlier ACK is pending.
+    const alarmChanged = !lastNoisePacket || latestNoise.alarm !== lastNoisePacket.alarm;
+    const delay = alarmChanged ? 0 : noiseRetryInterval - (performance.now() - lastNoiseSent);
     if (delay > 0) { noiseTimer = setTimeout(() => { noiseTimer = null; void sendNoise(); }, delay); return; }
     lastNoiseSent = performance.now();
-    try { await command('noise', { noise: latestNoise }); }
-    catch {}
+    const packet = { ...latestNoise };
+    const currentGeneration = generation;
+    lastNoisePacket = packet;
+    noiseRetry = false;
+    try { await command('noise', { noise: packet }); }
+    catch {
+      if (generation !== currentGeneration || lastNoisePacket !== packet) return;
+      noiseRetry = true;
+      // Bound retries, including after an ACK timeout.
+      lastNoiseSent = performance.now();
+      if (isReady() && room?.microphone?.deviceId === deviceId && display.getMicrophoneState()) {
+        noiseTimer = setTimeout(() => { noiseTimer = null; void sendNoise(); }, noiseRetryInterval);
+      }
+    }
   }
   document.addEventListener('classe-calme:noise', event => {
     if (!Number.isFinite(event.detail?.level)) return;
-    latestNoise = { level: Math.max(0, Math.min(100, event.detail.level)), alarm: event.detail.alarm === true };
+    // Keep the v1 payload shape without transmitting microphone measurements.
+    latestNoise = { level: 0, alarm: event.detail.alarm === true };
     void sendNoise();
   });
   document.addEventListener('classe-calme:display', queueDisplay);
@@ -608,7 +669,7 @@
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible' || hidden) return;
     if (!socket || socket.readyState > WebSocket.OPEN) connect();
-    else if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ping' }));
+    else if (socket.readyState === WebSocket.OPEN) scheduleHeartbeat();
   });
   window.addEventListener('pagehide', () => { hidden = true; disconnect(); });
   window.addEventListener('pageshow', event => { if (event.persisted) { hidden = false; connect(); } });
