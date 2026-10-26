@@ -8,6 +8,9 @@
   let grant = null, claims = null, attempted = false, expiryTimer = null;
   let dialog, form, passwordInput, feedback, submitButton, closeButton, dockButton;
   let busy = false, operation = null, returnFocus = null, dialogGeneration = 0;
+  let passwordDialog, passwordForm, currentPasswordInput, newPasswordInput, confirmPasswordInput, passwordFeedback;
+  let passwordSubmitButton, passwordCancelButton, passwordCloseButton, passwordConnectButton, changePasswordButton;
+  let passwordBusy = false, passwordReturnFocus = null, changeAfterLogin = false;
 
   // Les anciennes autorisations et leurs adresses de retour ne servent plus.
   try {
@@ -84,6 +87,7 @@
     operation = null;
     setBusy(false);
     passwordInput.value = '';
+    changeAfterLogin = false;
     if (dialog.open) dialog.close();
     returnFocus?.focus?.();
   }
@@ -123,7 +127,9 @@
       if (response.status === 429) { showFeedback(rateLimitMessage(response)); return; }
       if (!response.ok) { showFeedback('Connexion indisponible. Réessaie.'); return; }
       if (!accept(result.grant)) { showFeedback('Connexion indisponible. Réessaie.'); return; }
+      const continueChange = changeAfterLogin;
       close();
+      if (continueChange) openPasswordChange();
     } catch {
       if (dialog.open && generation === dialogGeneration) showFeedback('Connexion impossible. Vérifie Internet puis réessaie.');
     } finally {
@@ -156,6 +162,142 @@
     if (!dialog.open) { returnFocus = dockButton; dialog.showModal(); }
     closeButton.textContent = 'Fermer';
   }
+  function emptyPasswordFields() {
+    currentPasswordInput.value = newPasswordInput.value = confirmPasswordInput.value = '';
+  }
+  function setPasswordBusy(value) {
+    passwordBusy = value;
+    for (const field of [currentPasswordInput, newPasswordInput, confirmPasswordInput, passwordSubmitButton, passwordCancelButton, passwordCloseButton]) field.disabled = value;
+    passwordForm.setAttribute('aria-busy', String(value));
+  }
+  function closePasswordChange() {
+    if (passwordBusy) return;
+    emptyPasswordFields();
+    if (passwordDialog.open) passwordDialog.close();
+    passwordReturnFocus?.focus?.();
+  }
+  function passwordResult(message, success = false) {
+    emptyPasswordFields();
+    passwordForm.hidden = true;
+    passwordFeedback.textContent = message;
+    passwordFeedback.classList.toggle('prof-password-success', success);
+    passwordConnectButton.hidden = false;
+    passwordCancelButton.textContent = 'Fermer';
+    passwordConnectButton.focus();
+  }
+  function openPasswordChange() {
+    if (busy || passwordBusy || operation) return false;
+    mount();
+    if (!getGrant()) {
+      changeAfterLogin = true;
+      connect();
+      return true;
+    }
+    if (passwordDialog.open) return true;
+    window.settings?.(false);
+    window.tabPicker?.(false);
+    window.ClasseCalmeTools?.closePanel();
+    document.dispatchEvent(new Event('classe-calme:close-connections'));
+    passwordReturnFocus = document.getElementById('settingsButton') || changePasswordButton;
+    emptyPasswordFields();
+    setPasswordBusy(false);
+    passwordForm.hidden = false;
+    passwordFeedback.textContent = '';
+    passwordFeedback.classList.remove('prof-password-success');
+    passwordConnectButton.hidden = true;
+    passwordCancelButton.textContent = 'Annuler';
+    passwordDialog.showModal();
+    currentPasswordInput.focus();
+    return true;
+  }
+  async function changePassword(event) {
+    event.preventDefault();
+    if (passwordBusy) return;
+    const token = getGrant();
+    if (!token) { passwordResult('Session expirée. Reconnecte-toi puis réessaie.'); return; }
+    let currentPassword = currentPasswordInput.value;
+    let newPassword = newPasswordInput.value;
+    if (!currentPassword) { passwordFeedback.textContent = 'Saisis l’ancien mot de passe.'; currentPasswordInput.focus(); return; }
+    if (newPassword.length < 12 || newPassword.length > 256) { passwordFeedback.textContent = 'Choisis au moins 12 caractères.'; newPasswordInput.focus(); return; }
+    if (newPassword === currentPassword) { passwordFeedback.textContent = 'Choisis un mot de passe différent de l’ancien.'; newPasswordInput.focus(); return; }
+    if (newPassword !== confirmPasswordInput.value) { passwordFeedback.textContent = 'Les nouveaux mots de passe ne correspondent pas.'; confirmPasswordInput.focus(); return; }
+    setPasswordBusy(true);
+    emptyPasswordFields();
+    passwordFeedback.textContent = 'Enregistrement…';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    let reconnect = false;
+    try {
+      const pending = fetch(endpoint('/password'), {
+        method: 'POST', credentials: 'omit', cache: 'no-store', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+        body: JSON.stringify({ currentPassword, newPassword })
+      });
+      currentPassword = newPassword = '';
+      const response = await pending;
+      let result = null;
+      try { result = await response.json(); } catch {}
+      if (response.ok && result?.ok === true) {
+        clearGrant();
+        reconnect = true;
+        passwordResult('Mot de passe modifié. Reconnecte tes appareils.', true);
+      } else if (response.status === 401) {
+        clearGrant();
+        reconnect = true;
+        passwordResult('Session expirée. Reconnecte-toi puis réessaie.');
+      } else if (response.status === 403 && result?.error === 'current_password') {
+        passwordFeedback.textContent = 'Ancien mot de passe incorrect. Réessaie.';
+      } else if (response.status === 429) {
+        passwordFeedback.textContent = rateLimitMessage(response);
+      } else if (response.status === 400 && result?.error === 'weak_password') {
+        passwordFeedback.textContent = 'Choisis au moins 12 caractères.';
+      } else if (response.status === 400 && result?.error === 'same_password') {
+        passwordFeedback.textContent = 'Choisis un mot de passe différent de l’ancien.';
+      } else if (response.status === 400 || response.status === 403) {
+        passwordFeedback.textContent = 'Changement refusé. Réessaie.';
+      } else {
+        clearGrant();
+        reconnect = true;
+        passwordResult('Résultat non confirmé. Reconnecte-toi avec le nouveau mot de passe ; sinon essaie l’ancien.');
+      }
+    } catch {
+      clearGrant();
+      reconnect = true;
+      passwordResult('Résultat non confirmé. Vérifie Internet puis reconnecte-toi avec le nouveau mot de passe ; sinon essaie l’ancien.');
+    } finally {
+      currentPassword = newPassword = '';
+      clearTimeout(timeout);
+      setPasswordBusy(false);
+      emptyPasswordFields();
+      if (passwordDialog.open) (reconnect ? passwordConnectButton : currentPasswordInput).focus();
+    }
+  }
+  function mountPasswordChange() {
+    changePasswordButton = document.getElementById('changeProfPassword');
+    if (!changePasswordButton) return;
+    passwordDialog = document.createElement('dialog');
+    passwordDialog.id = 'profPasswordChange';
+    passwordDialog.setAttribute('aria-labelledby', 'profPasswordChangeTitle');
+    passwordDialog.innerHTML = '<div class="prof-login-heading"><h2 id="profPasswordChangeTitle">Changer mon mot de passe</h2><button id="closeProfPasswordChange" type="button" aria-label="Fermer">×</button></div><form id="profPasswordChangeForm"><label for="profCurrentPassword">Ancien mot de passe</label><input id="profCurrentPassword" type="password" name="currentPassword" autocomplete="current-password" required maxlength="256"><label for="profNewPassword">Nouveau mot de passe</label><input id="profNewPassword" type="password" name="newPassword" autocomplete="new-password" required minlength="12" maxlength="256" aria-describedby="profPasswordHint"><p id="profPasswordHint">12 caractères minimum.</p><label for="profConfirmPassword">Confirmer le nouveau mot de passe</label><input id="profConfirmPassword" type="password" name="confirmPassword" autocomplete="new-password" required minlength="12" maxlength="256"><button id="submitProfPasswordChange" type="submit">Enregistrer</button></form><p id="profPasswordChangeFeedback" role="status" aria-live="polite"></p><button id="connectAfterPasswordChange" type="button" hidden>Se connecter</button><button id="cancelProfPasswordChange" type="button">Annuler</button>';
+    document.body.append(passwordDialog);
+    passwordForm = document.getElementById('profPasswordChangeForm');
+    currentPasswordInput = document.getElementById('profCurrentPassword');
+    newPasswordInput = document.getElementById('profNewPassword');
+    confirmPasswordInput = document.getElementById('profConfirmPassword');
+    passwordFeedback = document.getElementById('profPasswordChangeFeedback');
+    passwordSubmitButton = document.getElementById('submitProfPasswordChange');
+    passwordCancelButton = document.getElementById('cancelProfPasswordChange');
+    passwordCloseButton = document.getElementById('closeProfPasswordChange');
+    passwordConnectButton = document.getElementById('connectAfterPasswordChange');
+    passwordForm.addEventListener('submit', changePassword);
+    passwordCancelButton.addEventListener('click', closePasswordChange);
+    passwordCloseButton.addEventListener('click', closePasswordChange);
+    passwordConnectButton.addEventListener('click', () => { closePasswordChange(); connect(); });
+    passwordDialog.addEventListener('cancel', event => { event.preventDefault(); closePasswordChange(); });
+    passwordDialog.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closePasswordChange(); } });
+    passwordDialog.addEventListener('close', emptyPasswordFields);
+    changePasswordButton.addEventListener('click', openPasswordChange);
+  }
   function mount() {
     if (dialog) return;
     dockButton = document.getElementById('profAuthButton');
@@ -177,6 +319,7 @@
     dialog.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); } });
     dialog.addEventListener('close', () => { passwordInput.value = ''; });
     dockButton?.addEventListener('click', () => getGrant() ? void logout() : connect());
+    mountPasswordChange();
     syncButton();
   }
   function connect() {

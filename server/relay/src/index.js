@@ -49,6 +49,11 @@ function authConfig(env) {
 function hexBytes(value) {
   return Uint8Array.from(value.match(/../g), byte => parseInt(byte, 16));
 }
+function hexString(value) { return Array.from(new Uint8Array(value), byte => byte.toString(16).padStart(2, '0')).join(''); }
+async function passwordBits(password, salt) {
+  const material = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
+  return crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', iterations: 100000, salt: hexBytes(salt) }, material, 256);
+}
 function base64url(bytes) {
   return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
@@ -166,7 +171,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true });
-    if (!['/live', '/teacher', '/files', '/correction', '/login', '/logout', '/publish', '/release'].includes(url.pathname)) return json({ error: 'not_found' }, 404);
+    if (!['/live', '/teacher', '/files', '/correction', '/login', '/logout', '/password', '/publish', '/release'].includes(url.pathname)) return json({ error: 'not_found' }, 404);
     const origin = request.headers.get('origin');
     const reply = response => cors(response, origin, env.STUDENT_ORIGIN);
     const channel = channelName(url);
@@ -175,7 +180,7 @@ export default {
       if (origin !== env.STUDENT_ORIGIN) return json({ error: 'origin' }, 403);
       if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'websocket_required' }, 426);
     } else {
-      if (origin && origin !== env.STUDENT_ORIGIN) return json({ error: 'origin' }, 403);
+      if ((origin && origin !== env.STUDENT_ORIGIN) || (url.pathname === '/password' && origin !== env.STUDENT_ORIGIN)) return json({ error: 'origin' }, 403);
       if (request.method === 'OPTIONS') return reply(new Response(null, { status: 204 }));
       if (url.pathname === '/correction' ? request.method !== 'GET' : request.method !== 'POST' && !(url.pathname === '/files' && request.method === 'GET')) return reply(json({ error: 'method' }, 405));
       if (url.pathname !== '/correction' && !authConfig(env)) return reply(json({ error: 'auth_unavailable' }, 503));
@@ -205,6 +210,13 @@ export default {
         }
         payload = await authorized(token, env, channel);
         if (!payload) return reply(json({ error: 'unauthorized' }, 401));
+        if (url.pathname === '/password') {
+          let body;
+          try { body = await readJSON(request); } catch { return reply(json({ error: 'invalid_body' }, 400)); }
+          if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.currentPassword !== 'string' || typeof body.newPassword !== 'string') return reply(json({ error: 'invalid_body' }, 400));
+          const result = await env.CLASSROOM.getByName('teacher-auth').changePassword(body.currentPassword, body.newPassword, await hashedIP(request, env.TEACHER_AUTH_SECRET), payload.nonce, channel, payload.exp * 1000);
+          return reply(json(result.body, result.status, result.retryAfter ? { 'retry-after': String(result.retryAfter) } : {}));
+        }
         if (url.pathname === '/logout') {
           // Révoquer d'abord l'autorisation globale, puis fermer la projection liée à ce jeton.
           await env.CLASSROOM.getByName('teacher-auth').revokeSession(payload.nonce);
@@ -236,6 +248,8 @@ export class ClassroomRelay extends DurableObject {
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS revoked (nonce TEXT PRIMARY KEY, expiresAt INTEGER NOT NULL)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS auth_sessions (nonce TEXT PRIMARY KEY, channel TEXT NOT NULL, expiresAt INTEGER NOT NULL)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS auth_attempts (id TEXT PRIMARY KEY, ipHash TEXT NOT NULL, attemptedAt INTEGER NOT NULL)');
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS auth_credentials (id INTEGER PRIMARY KEY CHECK(id=1), salt TEXT NOT NULL, hash TEXT NOT NULL, revision INTEGER NOT NULL)');
+    ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS auth_revocations (nonce TEXT PRIMARY KEY, channel TEXT NOT NULL, expiresAt INTEGER NOT NULL)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS remote_room (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS remote_devices (deviceId TEXT PRIMARY KEY, label TEXT NOT NULL, nonce TEXT NOT NULL, authExpires INTEGER NOT NULL, expiresAt INTEGER NOT NULL, connectionId TEXT NOT NULL)');
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS remote_files (id TEXT PRIMARY KEY, parts INTEGER NOT NULL, size INTEGER NOT NULL, complete INTEGER NOT NULL, expiresAt INTEGER NOT NULL, orphanUntil INTEGER)');
@@ -266,9 +280,18 @@ export class ClassroomRelay extends DurableObject {
     }
     return Math.min(expiresAt, row.authExpires);
   }
-  async login(password, ipHash, channel) {
-    const config = authConfig(this.env);
-    if (!config) return { status: 503, body: { error: 'auth_unavailable' } };
+  credential() {
+    const stored = this.sql('SELECT salt,hash,revision FROM auth_credentials WHERE id=1').toArray()[0];
+    // Un enregistrement présent mais invalide ne réactive jamais le mot de passe initial.
+    if (stored) return /^[a-f0-9]{32}$/.test(stored.salt) && /^[a-f0-9]{64}$/.test(stored.hash) && Number.isSafeInteger(stored.revision) && stored.revision > 0 ? stored : null;
+    const initial = authConfig(this.env);
+    return initial ? { ...initial, revision: 0 } : null;
+  }
+  sameCredential(config) {
+    const current = this.credential();
+    return Boolean(current && config && current.revision === config.revision && current.salt === config.salt && current.hash === config.hash);
+  }
+  reserveAuthAttempt(ipHash) {
     const now = Date.now();
     this.sql('DELETE FROM auth_attempts WHERE attemptedAt<=?', now - LOGIN_WINDOW);
     this.sql('DELETE FROM auth_sessions WHERE expiresAt<=?', now);
@@ -281,16 +304,65 @@ export class ClassroomRelay extends DurableObject {
     }
     // Réserver la tentative avant le calcul coûteux ; les requêtes parallèles respectent la limite.
     this.sql('INSERT INTO auth_attempts(id,ipHash,attemptedAt) VALUES(?,?,?)', crypto.randomUUID(), ipHash, now);
+    return null;
+  }
+  async login(password, ipHash, channel) {
+    const config = this.credential();
+    if (!config) return { status: 503, body: { error: 'auth_unavailable' } };
+    const limited = this.reserveAuthAttempt(ipHash);
+    if (limited) return limited;
     if (typeof password !== 'string' || !password.length || password.length > 256) return { status: 401, body: { error: 'unauthorized' } };
-    const material = await crypto.subtle.importKey('raw', encoder.encode(password), 'PBKDF2', false, ['deriveBits']);
-    const supplied = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', iterations: 100000, salt: hexBytes(config.salt) }, material, 256);
+    const supplied = await passwordBits(password, config.salt);
     if (!crypto.subtle.timingSafeEqual(supplied, hexBytes(config.hash))) return { status: 401, body: { error: 'unauthorized' } };
     const iat = Math.floor(Date.now() / 1000);
     const payload = { v: 2, aud: 'classe-calme-github', scope: 'publish', channel, iat, exp: iat + AUTH_LIFETIME / 1000, nonce: crypto.randomUUID() };
     const grant = await signedGrant(this.env.TEACHER_AUTH_SECRET, payload);
     const expiresAt = payload.exp * 1000;
+    // Un changement arrivé pendant PBKDF2 ou la signature rend ce résultat caduc.
+    if (!this.sameCredential(config)) return { status: 401, body: { error: 'unauthorized' } };
     this.sql('INSERT INTO auth_sessions(nonce,channel,expiresAt) VALUES(?,?,?)', payload.nonce, channel, expiresAt);
     return { status: 200, body: { grant, expiresAt } };
+  }
+  async changePassword(currentPassword, newPassword, ipHash, nonce, channel, expiresAt) {
+    if (!this.isSessionActive(nonce, channel, expiresAt)) return { status: 401, body: { error: 'unauthorized' } };
+    if (typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 256) return { status: 400, body: { error: 'weak_password' } };
+    const config = this.credential();
+    if (!config) return { status: 503, body: { error: 'auth_unavailable' } };
+    const limited = this.reserveAuthAttempt(ipHash);
+    if (limited) return limited;
+    if (typeof currentPassword !== 'string' || !currentPassword.length || currentPassword.length > 256) return { status: 403, body: { error: 'current_password' } };
+    const supplied = await passwordBits(currentPassword, config.salt);
+    if (!this.isSessionActive(nonce, channel, expiresAt) || !this.sameCredential(config)) return { status: 401, body: { error: 'unauthorized' } };
+    if (!crypto.subtle.timingSafeEqual(supplied, hexBytes(config.hash))) return { status: 403, body: { error: 'current_password' } };
+    if (currentPassword === newPassword) return { status: 400, body: { error: 'same_password' } };
+    const salt = hexString(crypto.getRandomValues(new Uint8Array(16)));
+    const hash = hexString(await passwordBits(newPassword, salt));
+    // L'alarme est durable avant la transaction : même une interruption après la
+    // rotation reprend la fermeture des anciens écrans, sans requête périodique.
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
+    const changed = this.ctx.storage.transactionSync(() => {
+      if (!this.isSessionActive(nonce, channel, expiresAt) || !this.sameCredential(config)) return false;
+      this.sql('INSERT INTO auth_credentials(id,salt,hash,revision) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET salt=excluded.salt,hash=excluded.hash,revision=excluded.revision', salt, hash, config.revision + 1);
+      this.sql('INSERT OR IGNORE INTO auth_revocations(nonce,channel,expiresAt) SELECT nonce,channel,expiresAt FROM auth_sessions WHERE expiresAt>?', Date.now());
+      this.sql('DELETE FROM auth_sessions');
+      return true;
+    });
+    if (!changed) return { status: 401, body: { error: 'unauthorized' } };
+    await this.drainAuthRevocations();
+    return { status: 200, body: { ok: true } };
+  }
+  async drainAuthRevocations() {
+    for (const row of this.sql('SELECT nonce,channel,expiresAt FROM auth_revocations').toArray()) {
+      try {
+        if (row.expiresAt > Date.now()) await this.env.CLASSROOM.getByName(row.channel).revokeTeacher(row.nonce, row.expiresAt, true);
+        this.sql('DELETE FROM auth_revocations WHERE nonce=?', row.nonce);
+      } catch {
+        await this.ctx.storage.setAlarm(Date.now() + 1000);
+        return;
+      }
+    }
+    // L'alarme déjà réservée fera un dernier contrôle, puis s'arrêtera. Ne pas
+    // l'annuler ici : une autre rotation peut ajouter du travail pendant un RPC.
   }
   isSessionActive(nonce, channel, expiresAt) {
     if (!UUID.test(nonce || '') || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) return false;
@@ -299,7 +371,7 @@ export class ClassroomRelay extends DurableObject {
   revokeSession(nonce) {
     this.sql('DELETE FROM auth_sessions WHERE nonce=?', nonce);
   }
-  async revokeTeacher(nonce, expiresAt) {
+  async revokeTeacher(nonce, expiresAt, passwordChanged = false) {
     this.sql('INSERT INTO revoked(nonce,expiresAt) VALUES(?,?) ON CONFLICT(nonce) DO UPDATE SET expiresAt=MAX(expiresAt,excluded.expiresAt)', nonce, expiresAt);
     const current = this.stored();
     if (current?.authNonce === nonce) {
@@ -308,6 +380,17 @@ export class ClassroomRelay extends DurableObject {
       this.broadcast();
     }
     for (const device of this.deviceRows().filter(device => device.nonce === nonce)) this.removeDevice(device.deviceId, device.connectionId);
+    if (passwordChanged && !this.devices().length) {
+      const room = this.remote();
+      if (room) {
+        room.tools.notice = null;
+        room.tools.timer = null;
+        room.noise = { level: 0, alarm: false };
+        room.testUntil = room.pauseUntil = 0;
+        room.correction = false;
+        this.saveRoom(room);
+      }
+    }
     for (const socket of this.ctx.getWebSockets()) if (this.attachment(socket)?.authNonce === nonce) try { socket.close(1008, 'Signed out'); } catch {}
     await this.scheduleAlarm();
     this.broadcastRemote();
@@ -686,6 +769,10 @@ export class ClassroomRelay extends DurableObject {
     return json(this.teacherStats(Boolean(this.stored()?.expiresAt > Date.now())));
   }
   async alarm() {
+    if (this.sql('SELECT nonce FROM auth_revocations LIMIT 1').toArray().length) {
+      await this.drainAuthRevocations();
+      return;
+    }
     const now = Date.now();
     this.cleanupRemote(now);
     const state = this.stored();

@@ -60,7 +60,9 @@ Les tests du relais simulent 6 heures, 30 activités connectées, deux appareils
 
 Aucun secret n’est présent dans ce dépôt. Les valeurs privées restent dans la configuration des serveurs. GitHub Pages héberge uniquement l’interface ; le relais reste nécessaire pour joindre des PC différents.
 
-Le relais utilise deux secrets Cloudflare : `TEACHER_PASSWORD_HASH` (empreinte PBKDF2-SHA-256 salée, format `pbkdf2-sha256:100000:<sel hex32>:<empreinte hex64>`) et `TEACHER_AUTH_SECRET` (clé aléatoire de signature d’au moins 32 caractères). Le mot de passe n’est pas enregistré dans le navigateur. Les tentatives de connexion sont limitées et les sessions sont révocables côté serveur. Pour révoquer toutes les autorisations lors d’un changement de mot de passe, renouveler aussi la clé de signature.
+Dans **Réglages → Changer mon mot de passe**, saisir l’ancien mot de passe, puis le nouveau deux fois. Le nouveau doit contenir au moins 12 caractères. Le changement déconnecte tous les appareils professeur ; les reconnecter avec le nouveau mot de passe.
+
+Le relais utilise deux secrets Cloudflare : `TEACHER_PASSWORD_HASH` (empreinte initiale PBKDF2-SHA-256 salée, format `pbkdf2-sha256:100000:<sel hex32>:<empreinte hex64>`) et `TEACHER_AUTH_SECRET` (clé aléatoire de signature d’au moins 32 caractères). Après un changement, seule la nouvelle empreinte salée est conservée dans le stockage privé du relais et elle reste valable après une publication. Le mot de passe n’est pas enregistré dans le navigateur. Les tentatives sont limitées et les sessions sont révocables côté serveur. Une rotation manuelle de la clé de signature reste possible pour invalider les jetons.
 
 La synchronisation des appareils utilise une connexion professeur distincte des pages élèves. Le pilote de l’affichage et la source du micro ont chacun leur propre droit temporaire. Le transfert des PDF de projection est authentifié et fractionné ; ces fichiers ne sont jamais publiés dans GitHub ni transmis par les connexions élèves.
 
